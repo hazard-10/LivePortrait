@@ -270,7 +270,7 @@ class Cropper(object):
                 lmk = self.landmark_runner.run(frame_rgb_crop, lmk)
                 trajectory.start, trajectory.end = idx, idx
             else:
-                lmk = self.landmark_runner.run(frame_rgb_crop, trajectory.lmk_lst[-1])
+                lmk = self.landmark_runner.run(frame_rgb_crop, None)
                 trajectory.end = idx
 
             trajectory.lmk_lst.append(lmk)

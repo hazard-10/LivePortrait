@@ -14,7 +14,7 @@ pretrained_weights/docs
 pretrained_weights/liveportrait
 
 # Ipython notebook
-*.ipynb
+#*.ipynb
 
 # Temporary files or benchmark resources
 animations/*

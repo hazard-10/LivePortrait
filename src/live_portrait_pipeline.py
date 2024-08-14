@@ -310,21 +310,22 @@ class LivePortraitPipeline(object):
 
             # Algorithm 1:
             if not inf_cfg.flag_stitching and not inf_cfg.flag_eye_retargeting and not inf_cfg.flag_lip_retargeting:
-                # without stitching or retargeting
-                if flag_normalize_lip and lip_delta_before_animation is not None:
-                    x_d_i_new += lip_delta_before_animation
-                if flag_source_video_eye_retargeting and eye_delta_before_animation is not None:
-                    x_d_i_new += eye_delta_before_animation
-                else:
-                    pass
+                # # without stitching or retargeting
+                # if flag_normalize_lip and lip_delta_before_animation is not None:
+                #     x_d_i_new += lip_delta_before_animation
+                # if flag_source_video_eye_retargeting and eye_delta_before_animation is not None:
+                #     x_d_i_new += eye_delta_before_animation
+                # else:
+                pass
             elif inf_cfg.flag_stitching and not inf_cfg.flag_eye_retargeting and not inf_cfg.flag_lip_retargeting:
                 # with stitching and without retargeting
-                if flag_normalize_lip and lip_delta_before_animation is not None:
-                    x_d_i_new = self.live_portrait_wrapper.stitching(x_s, x_d_i_new) + lip_delta_before_animation
-                else:
-                    x_d_i_new = self.live_portrait_wrapper.stitching(x_s, x_d_i_new)
-                if flag_source_video_eye_retargeting and eye_delta_before_animation is not None:
-                    x_d_i_new += eye_delta_before_animation
+                # if flag_normalize_lip and lip_delta_before_animation is not None:
+                #     x_d_i_new = self.live_portrait_wrapper.stitching(x_s, x_d_i_new) + lip_delta_before_animation
+                # else:
+                #     x_d_i_new = self.live_portrait_wrapper.stitching(x_s, x_d_i_new)
+                # if flag_source_video_eye_retargeting and eye_delta_before_animation is not None:
+                #     x_d_i_new += eye_delta_before_animation
+                pass
             else:
                 eyes_delta, lip_delta = None, None
                 if inf_cfg.flag_eye_retargeting and source_lmk is not None:
