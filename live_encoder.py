@@ -248,12 +248,21 @@ def process_videos(uid, video_paths, output_dir):
     pbar.close()
 
 if __name__ == '__main__':
-    json_path = '/mnt/c/Users/mjh/Downloads/output_union_512.json'
-    root_dir = '/mnt/e/data/vox2/videos/512/'  # Replace this with your actual root directory
-    output_dir = '/mnt/c/Users/mjh/Downloads/out_test/'
-    video_paths = load_video(json_path, root_dir)
+    import argparse
+
+    parser = argparse.ArgumentParser(description='Process videos for live encoding')
+    parser.add_argument('--json_path', type=str, default='/mnt/c/Users/mjh/Downloads/output_union_512.json',
+                        help='Path to the JSON file containing video information')
+    parser.add_argument('--root_dir', type=str, default='/mnt/e/data/vox2/videos/512/',
+                        help='Root directory containing the video files')
+    parser.add_argument('--output_dir', type=str, default='/mnt/c/Users/mjh/Downloads/out_test/',
+                        help='Output directory for processed files')
+
+    args = parser.parse_args()
+
+    video_paths = load_video(args.json_path, args.root_dir)
 
     for uid, paths in tqdm(video_paths.items(), desc="Processing users"):
-        uid_output_dir = os.path.join(output_dir, uid)
+        uid_output_dir = os.path.join(args.output_dir, uid)
         os.makedirs(uid_output_dir, exist_ok=True)
         process_videos(uid, paths, uid_output_dir)
