@@ -162,14 +162,17 @@ def load_video(json_path, root_dir):
     video_paths = {}
 
     # Iterate through the JSON structure
-    for first_level_key in data:
+    for first_level_key in sorted(data.keys()):
         video_paths[first_level_key] = []
-        for second_level_key in data[first_level_key]:
-            for third_level_key in data[first_level_key][second_level_key]:
+        for second_level_key in sorted(data[first_level_key].keys()):
+            for third_level_key in sorted(data[first_level_key][second_level_key]):
                 third_level_key = third_level_key.split('.')[0]
                 # Construct the video path
                 video_path = os.path.join(root_dir, first_level_key, second_level_key, f"{third_level_key}.mp4")
                 video_paths[first_level_key].append(video_path)
+
+        # Sort the video paths for each first_level_key
+        video_paths[first_level_key].sort()
 
     # Print the results
     print(f"Generated {len(video_paths)} video paths.")
