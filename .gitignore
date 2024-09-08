@@ -27,3 +27,10 @@ gradio_temp/**
 ffmpeg/
 LivePortrait_env/
 live_env
+
+audio_driven_video_output.mp4
+video_driven_output.mp4
+output_video_with_audio.mp4
+output_video_without_audio.mp4
+audio_dit/
+vid_output/

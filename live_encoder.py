@@ -1,3 +1,7 @@
+'''
+For parasing training set with LivePortrait latent
+'''
+
 import json
 import os
 
