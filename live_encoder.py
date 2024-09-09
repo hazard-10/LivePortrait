@@ -109,8 +109,8 @@ def get_kp_info(x: torch.Tensor, **kwargs) -> dict:
         kp_info['pitch'] = headpose_pred_to_degree(kp_info['pitch'])[:, None]  # Bx1
         kp_info['yaw'] = headpose_pred_to_degree(kp_info['yaw'])[:, None]  # Bx1
         kp_info['roll'] = headpose_pred_to_degree(kp_info['roll'])[:, None]  # Bx1
-        kp_info['kp'] = kp_info['kp'].reshape(bs, -1, 3)  # BxNx3
-        kp_info['exp'] = kp_info['exp'].reshape(bs, -1, 3)  # BxNx3
+        # kp_info['kp'] = kp_info['kp'].reshape(bs, -1, 3)  # BxNx3
+        # kp_info['exp'] = kp_info['exp'].reshape(bs, -1, 3)  # BxNx3
 
     return kp_info
 
@@ -182,7 +182,7 @@ def load_video(json_path, root_dir):
     print(f"Generated {len(video_paths)} video paths.")
     return video_paths
 
-def process_videos(uid, video_paths, output_dir):
+def process_videos(uid, video_paths, output_dir, param_list, param_dim_list):
     read_2_gpu_batch_size = 2048
     gpu_batch_size = 16
     process_queue = torch.Tensor().to(device)
@@ -200,7 +200,7 @@ def process_videos(uid, video_paths, output_dir):
         video_lengths.append(frame_count)
         clip_id = video_path.split('/')[-1].split('.')[0]
         url_id = video_path.split('/')[-2]
-        vid_keys.append(f"{url_id}+{clip_id}+{frame_count}")
+        vid_keys.append(f"{url_id}+{clip_id}")
 
     all_frames = np.array(all_frames)
 
@@ -222,9 +222,13 @@ def process_videos(uid, video_paths, output_dir):
             x_info = get_kp_info(mini_batch)
 
             concat_tensor = torch.cat([
-                x_info['exp'].reshape(mini_batch_end - mini_batch_start, -1),
-                x_info['t'],
-                torch.cat([x_info['pitch'], x_info['yaw'], x_info['roll']], dim=1),
+                x_info['kp'], # 63
+                x_info['exp'], # 63, .reshape(mini_batch_end - mini_batch_start, -1),
+                x_info['t'], # 3
+                x_info['pitch'], # 1
+                x_info['yaw'], # 1
+                x_info['roll'], # 1
+                x_info['scale'], # 1
             ], dim=1)
 
             all_info.append(concat_tensor)
@@ -239,8 +243,12 @@ def process_videos(uid, video_paths, output_dir):
             current_frame_count = video_lengths[0]
 
             video_tensor = process_queue[:current_frame_count]
-            save_path = os.path.join(output_dir, f"{current_vid_key}.npy")
-            np.save(save_path, video_tensor.cpu().numpy())
+            for p in param_list:
+                save_dir_p = os.path.join(output_dir, p)
+                save_dir_uid = os.path.join(save_dir_p, uid)
+                save_path = os.path.join(save_dir_uid, f"{current_vid_key}.npy")
+                os.makedirs(save_dir_uid, exist_ok=True)
+                np.save(save_path, video_tensor.cpu().numpy())
 
             process_queue = process_queue[current_frame_count:]
             vid_keys.pop(0)
@@ -266,7 +274,12 @@ if __name__ == '__main__':
 
     video_paths = load_video(args.json_path, args.root_dir)
 
+    param_list = ['kp', 'exp', 't', 'pitch', 'yaw', 'roll', 'scale']
+    param_dim_list = [63, 63, 3, 1, 1, 1, 1]
+    for p in param_list:
+        os.makedirs(os.path.join(args.output_dir, p), exist_ok=True)
+
     for uid, paths in tqdm(video_paths.items(), desc="Processing users"):
         uid_output_dir = os.path.join(args.output_dir, uid)
         os.makedirs(uid_output_dir, exist_ok=True)
-        process_videos(uid, paths, uid_output_dir)
+        process_videos(uid, paths, args.output_dir, param_list, param_dim_list)
