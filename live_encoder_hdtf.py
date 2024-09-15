@@ -158,24 +158,45 @@ cropper = Cropper(crop_cfg=crop_cfg, device=device)
 
 
 
-def load_video(json_path, root_dir):
-    # Load the JSON file
-    with open(json_path, 'r') as f:
-        data = json.load(f)
+def load_video(root_dir):
 
+    # video_paths = {}
+
+    # # Iterate through the JSON structure
+    # for first_level_key in sorted(data.keys()):
+    #     video_paths[first_level_key] = []
+    #     for second_level_key in sorted(data[first_level_key].keys()):
+    #         for third_level_key in sorted(data[first_level_key][second_level_key]):
+    #             third_level_key = third_level_key.split('.')[0]
+    #             # Construct the video path
+    #             video_path = os.path.join(root_dir, first_level_key, second_level_key, f"{third_level_key}.mp4")
+    #             video_paths[first_level_key].append(video_path)
+
+    #     # Sort the video paths for each first_level_key
+    #     video_paths[first_level_key].sort()
+
+    # Clear existing video_paths
     video_paths = {}
 
-    # Iterate through the JSON structure
-    for first_level_key in sorted(data.keys()):
-        video_paths[first_level_key] = []
-        for second_level_key in sorted(data[first_level_key].keys()):
-            for third_level_key in sorted(data[first_level_key][second_level_key]):
-                third_level_key = third_level_key.split('.')[0]
-                # Construct the video path
-                video_path = os.path.join(root_dir, first_level_key, second_level_key, f"{third_level_key}.mp4")
+    # Walk through the root directory
+    for root, dirs, files in os.walk(root_dir):
+        for file in files:
+            if file.endswith('.mp4'):
+                # Get the full path of the video
+                video_path = os.path.join(root, file)
+
+                # Extract the first level key (user ID) from the path
+                first_level_key = os.path.relpath(root, root_dir).split(os.sep)[0]
+
+                # Initialize the list for this first_level_key if it doesn't exist
+                if first_level_key not in video_paths:
+                    video_paths[first_level_key] = []
+
+                # Add the video path to the list
                 video_paths[first_level_key].append(video_path)
 
-        # Sort the video paths for each first_level_key
+    # Sort the video paths for each first_level_key
+    for first_level_key in video_paths:
         video_paths[first_level_key].sort()
 
     # Print the results
@@ -198,9 +219,8 @@ def process_videos(uid, video_paths, output_dir, param_list, param_dim_list):
         frame_count = len(frames)
         total_frames += frame_count
         video_lengths.append(frame_count)
-        clip_id = video_path.split('/')[-1].split('.')[0]
-        url_id = video_path.split('/')[-2]
-        vid_keys.append(f"{url_id}+{clip_id}")
+        clip_id = video_path
+        vid_keys.append(f"{clip_id.split('/')[-1].split('.')[0]}")
 
     all_frames = np.array(all_frames)
 
@@ -244,6 +264,7 @@ def process_videos(uid, video_paths, output_dir, param_list, param_dim_list):
 
             video_tensor = process_queue[:current_frame_count]
             save_path = os.path.join(output_dir, f"{current_vid_key}.npy")
+            print(f"Saving {save_path}")
             np.save(save_path, video_tensor.cpu().numpy())
 
             process_queue = process_queue[current_frame_count:]
@@ -259,16 +280,15 @@ if __name__ == '__main__':
     import argparse
 
     parser = argparse.ArgumentParser(description='Process videos for live encoding')
-    parser.add_argument('--json_path', type=str, default='/mnt/c/Users/mjh/Downloads/output_union_512.json',
-                        help='Path to the JSON file containing video information')
-    parser.add_argument('--root_dir', type=str, default='/mnt/e/data/vox2/videos/512/',
+    parser.add_argument('--root_dir', type=str, default='/mnt/e/data/diffposetalk_data/TFHP_raw/crop/',
                         help='Root directory containing the video files')
-    parser.add_argument('--output_dir', type=str, default='/mnt/c/Users/mjh/Downloads/out_test/',
+    parser.add_argument('--output_dir', type=str, default='/mnt/e/data/diffposetalk_data/TFHP_raw/live_latent/',
                         help='Output directory for processed files')
 
     args = parser.parse_args()
 
-    video_paths = load_video(args.json_path, args.root_dir)
+    video_paths = load_video(args.root_dir)
+    print(video_paths)
 
     param_list = ['kp', 'exp', 't', 'pitch', 'yaw', 'roll', 'scale']
     param_dim_list = [63, 63, 3, 1, 1, 1, 1]
