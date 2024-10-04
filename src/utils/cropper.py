@@ -248,30 +248,33 @@ class Cropper(object):
         }
 
 
-    def calc_lmks_from_cropped_video(self, driving_rgb_crop_lst, **kwargs):
+    def calc_lmks_from_cropped_video(self, driving_rgb_crop_lst, skip_target=1, **kwargs):
         """Tracking based landmarks/alignment"""
         trajectory = Trajectory()
         direction = kwargs.get("direction", "large-small")
 
         for idx, frame_rgb_crop in enumerate(driving_rgb_crop_lst):
-            if idx == 0 or trajectory.start == -1:
-                src_face = self.face_analysis_wrapper.get(
-                    contiguous(frame_rgb_crop[..., ::-1]),  # convert to BGR
-                    flag_do_landmark_2d_106=True,
-                    direction=direction,
-                )
-                if len(src_face) == 0:
-                    log(f"No face detected in the frame #{idx}")
-                    raise Exception(f"No face detected in the frame #{idx}")
-                elif len(src_face) > 1:
-                    log(f"More than one face detected in the driving frame_{idx}, only pick one face by rule {direction}.")
-                src_face = src_face[0]
-                lmk = src_face.landmark_2d_106
-                lmk = self.landmark_runner.run(frame_rgb_crop, lmk)
-                trajectory.start, trajectory.end = idx, idx
-            else:
-                lmk = self.landmark_runner.run(frame_rgb_crop, None)
-                trajectory.end = idx
+            if idx % skip_target != 0:
+                continue
+            # if idx == 0 or trajectory.start == -1:
+            #     src_face = self.face_analysis_wrapper.get(
+            #         contiguous(frame_rgb_crop[..., ::-1]),  # convert to BGR
+            #         flag_do_landmark_2d_106=True,
+            #         direction=direction,
+            #     )
+            #     if len(src_face) == 0:
+            #         log(f"No face detected in the frame #{idx}")
+            #         raise Exception(f"No face detected in the frame #{idx}")
+            #     # elif len(src_face) > 1:
+
+            #         # log(f"More than one face detected in the driving frame_{idx}, only pick one face by rule {direction}.")
+            #     src_face = src_face[0]
+            #     lmk = src_face.landmark_2d_106
+            #     lmk = self.landmark_runner.run(frame_rgb_crop, lmk)
+            #     trajectory.start, trajectory.end = idx, idx
+            # else:
+            lmk = self.landmark_runner.run(frame_rgb_crop, None)
+            trajectory.end = idx
 
             trajectory.lmk_lst.append(lmk)
         return trajectory.lmk_lst
