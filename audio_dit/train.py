@@ -59,10 +59,10 @@ class TrainingManager:
         
         self.output_dir = os.path.join(args.output_dir, time.strftime("%m%d-%H-%M-%S"))
         self.checkpoint_dir = args.checkpoint_dir
-        
-        self.train_data = train_data # motion_latents, audio_latents, shape_latents, mouth_latents, flag
-        self.val_data = val_data # N datasets of (motion_latents, audio_latents, shape_latents, mouth_latents, flag)
-        
+
+        self.train_data = train_data # motion_latents, audio_latents, shape_latents, mouth_latents, end_indices
+        self.val_data = val_data # N datasets of (motion_latents, audio_latents, shape_latents, mouth_latents, end_indices)
+
         self.prev_seq_length = 10
         self.data_regulator = None
         
@@ -252,6 +252,7 @@ class TrainingManager:
         a = batch['audio_latent'].to(self.device)
         s = batch['shape_latent'].to(self.device)
         m = batch['mouth_latent'].to(self.device)
+        end_indices = batch['end_indices'].to(self.device)
         # batch_size = x.shape[0]
 
         x_prev, x_gt = x[:, :self.prev_seq_length], x[:, self.prev_seq_length:]
@@ -278,6 +279,13 @@ class TrainingManager:
             # loss = masked_squared_diff.sum() / non_zero_mask.sum()
             x_pred = self.loss_weight * x_pred
             x_gt = self.loss_weight * x
+
+            batch_size, seq_length, _ = x_gt.shape
+            mask = torch.arange(seq_length, device=self.device).expand(batch_size, seq_length) < end_indices.unsqueeze(1)
+            # Apply the mask to both x_pred and x_gt
+            x_pred = x_pred[mask]
+            x_gt = x_gt[mask]
+
             loss = F.mse_loss(x_pred, x_gt)
             
             loss.backward()
@@ -394,14 +402,14 @@ class TrainingManager:
         all_val_info = []
         all_gen_info = []
 
-        if self.val_dataloaders is None:    
-            assert len(self.val_motion_latents) == len(self.val_audio_latents), f"Validation motion and audio latents must have the same length, \
-                currently have {len(self.val_motion_latents)} and {len(self.val_audio_latents)}"
-            valid_datasets_list = [MotionAudioDataset(val_data)
-                                   for val_data in self.val_data]
-            valid_samplers = [DistributedSampler(valid_dataset, num_replicas=self.world_size, rank=self.rank, shuffle=False) for valid_dataset in valid_datasets_list]
-            self.val_dataloaders = [DataLoader(valid_dataset, batch_size=self.config["valid_batch_size"], sampler=valid_sampler, pin_memory=True) for valid_dataset, valid_sampler in zip(valid_datasets_list, valid_samplers)]
-        
+        # assert len(self.val_motion_latents) == len(self.val_audio_latents), f"Validation motion and audio latents must have the same length, \
+        #     currently have {len(self.val_motion_latents)} and {len(self.val_audio_latents)}"
+        assert self.val_data is not None
+        valid_datasets_list = [MotionAudioDataset(val_data)
+                                for val_data in self.val_data]
+        valid_samplers = [DistributedSampler(valid_dataset, num_replicas=self.world_size, rank=self.rank, shuffle=False) for valid_dataset in valid_datasets_list]
+        self.val_dataloaders = [DataLoader(valid_dataset, batch_size=self.config["valid_batch_size"], sampler=valid_sampler, pin_memory=True) for valid_dataset, valid_sampler in zip(valid_datasets_list, valid_samplers)]
+
 
         with torch.no_grad():
             total_loss = [0 for _ in range(len(self.val_dataloaders) + 1)]
@@ -631,7 +639,9 @@ if __name__ == "__main__":
     count_key = args.vox2_train_end_idx - args.vox2_train_start_idx
 
     latent_mask_1 = [ 4, 6, 7, 22, 33, 34, 40, 43, 45, 46, 48, 51, 52, 53, 57, 58, 59, 60, 61, 62 ] # deleted 49,
-    loss_weight   = [ 1, 1, 1, 1,  2,  3,  1,  1,  2,  3,  2,  1,  1,  1,  1,  2,  1,  1,  3,  1, ]
+    loss_weight   = [ 1, 1, 1, 1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1, ]
+    latent_mask_1 += [i for i in range(63, 63 + 5)] # add 5 headpose features
+    loss_weight +=  [0.01, 0.01, 0.01, 0.1, 0.1] # relative scale is [0.003, 0.002, 0.003, 0.2, 0.2]
     latent_bound_list =[
         -0.05029296875,        0.0857086181640625,   -0.07587742805480957,  0.058624267578125,   -0.0004341602325439453,  0.00019466876983642578, 
         -0.038482666015625,    0.0345458984375,      -0.030120849609375,    0.038360595703125,   -3.0279159545898438e-05, 1.3887882232666016e-05,
@@ -652,9 +662,12 @@ if __name__ == "__main__":
         -0.01216888427734375,  0.02069091796875,     -0.016754150390625,    0.017974853515625,   -0.00014078617095947266, 6.842613220214844e-05, 
         -0.01910400390625,     0.016204833984375,    -0.025634765625,       0.04150390625,       -0.0100250244140625,     0.00991058349609375, 
         -0.005596160888671875, 0.01132965087890625,  -0.0269775390625,      0.02166748046875,    -0.000362396240234375,   9.059906005859375e-05,
-        -0.0325927734375,      0.038818359375,       -0.05877685546875,     0.076416015625,      -0.02215576171875,       0.019775390625, 
-         -0.0219573974609375,  0.0247344970703125,   -0.039764404296875,    0.045,               -0.01512908935546875,    0.017730712890625,    ]
-        
+        -0.0325927734375,      0.038818359375,       -0.05877685546875,     0.076416015625,      -0.02215576171875,       0.019775390625,
+        -0.0219573974609375,   0.0247344970703125,   -0.039764404296875,    0.045,               -0.01512908935546875,    0.017730712890625,
+        -21,                   25,                   -30,                   30,                  -23,                     23,
+        -0.3,                  0.3,                  -0.06,                 0.28,
+        ]
+
     '''
     0    -0.05029296875,        0.0857086181640625,   -0.07587742805480957,  0.058624267578125,   -0.0004341602325439453,  0.00019466876983642578, 
     3    -0.038482666015625,    0.0345458984375,      -0.030120849609375,    0.038360595703125,   -3.0279159545898438e-05, 1.3887882232666016e-05,
@@ -683,7 +696,7 @@ if __name__ == "__main__":
     config = {
         # Model parameters
         "model_type" : args.model_type,
-        "x_dim": len(latent_mask_1), 
+        "x_dim": len(latent_mask_1), # add 5, last 3 for rot, 2 for xy translation
         "person_dim": 63,  # Dimension for person latent
         "a_dim": 768,  # Dimension for audio latent
         "hidden_size": 512,  # Hidden size for the transformer
@@ -725,9 +738,9 @@ if __name__ == "__main__":
         "vox2_validate_end_idx": args.vox2_validate_end_idx,
     }
 
-    # Load data once in the main process    
-    train_data = [torch.Tensor([]) for _ in range(4)]   # motion, audio, shape, mouth
-    val_data = []  # motion, audio, shape, mouth
+    # Load data once in the main process
+    train_data = [torch.Tensor([]) for _ in range(5)]   # motion, audio, shape, mouth, end_indices
+    val_data = []  # motion, audio, shape, mouth, end_indices
     # train_audio_latents, train_motion_latents, train_shape_latents, train_mouth_latents, train_flag_latents, \
     #     val_audio_latents, val_motion_latents, val_shape_latents, val_mouth_latents, val_flag_latents = \
     #     torch.Tensor([]), torch.Tensor([]), torch.Tensor([]),torch.Tensor([]), torch.Tensor([]), [], [], [], [], []
@@ -738,7 +751,7 @@ if __name__ == "__main__":
                                                                         config["motion_latent_type"], config["latent_mask_1"], config["latent_bound"])
         val_data.append(vox2_val_data)
         print(f"Vox2 validation Data loaded. audio shape: {val_data[-1][0].shape}, \
-                motion shape: {val_data[-1][1].shape}, shape shape: {val_data[-1][2].shape}, mouth shape: {val_data[-1][3].shape}")
+                motion shape: {val_data[-1][1].shape}, shape shape: {val_data[-1][2].shape}, mouth shape: {val_data[-1][3].shape}, end_indices shape: {val_data[-1][4].shape}")
         if not config["validate_only"]:
             # Normal Training mode
             vox2_train_data = load_npy_files(args.vox2_audio_root, args.vox2_motion_root, 
@@ -747,8 +760,8 @@ if __name__ == "__main__":
             for i, d in enumerate(vox2_train_data):
                 train_data[i] = torch.cat([train_data[i], d], dim=0)
             print(f"Vox2 training Data loaded. audio shape: {train_data[0].shape}, motion shape: {train_data[1].shape}, \
-                                                shape shape: {train_data[2].shape}, mouth shape: {train_data[3].shape}")
-        
+                                                shape shape: {train_data[2].shape}, mouth shape: {train_data[3].shape}, end_indices shape: {train_data[4].shape}")
+
     if "hdtf" in args.dataset:
         train_audio_root = args.hdtf_train_root + "audio_latent/"
         train_motion_root = args.hdtf_train_root + "live_latent/"
@@ -757,13 +770,13 @@ if __name__ == "__main__":
         hdtf_val_data = load_npy_files(test_audio_root, test_motion_root, 0, 8,   
                                         config["motion_latent_type"], config["latent_mask_1"], config["latent_bound"]) # load all validation data
         val_data.append(hdtf_val_data)
-        print(f"HDTF validation Data loaded. audio shape: {val_data[-1][0].shape}, motion shape: {val_data[-1][1].shape}, shape shape: {val_data[-1][2].shape}, mouth shape: {val_data[-1][3].shape}")
+        print(f"HDTF validation Data loaded. audio shape: {val_data[-1][0].shape}, motion shape: {val_data[-1][1].shape}, shape shape: {val_data[-1][2].shape}, mouth shape: {val_data[-1][3].shape}, end_indices shape: {val_data[-1][4].shape}")
         if not config["validate_only"]:
             hdtf_train_data = load_npy_files(train_audio_root, train_motion_root, 
                                              args.hdtf_train_start_idx, args.hdtf_train_end_idx, 
                                              config["motion_latent_type"], config["latent_mask_1"], config["latent_bound"])
             print(f"HDTF training Data loaded. audio shape: {hdtf_train_data[0].shape}, motion shape: {hdtf_train_data[1].shape}, \
-                                                shape shape: {hdtf_train_data[2].shape}, mouth shape: {hdtf_train_data[3].shape}")
+                                                shape shape: {hdtf_train_data[2].shape}, mouth shape: {hdtf_train_data[3].shape}, end_indices shape: {hdtf_train_data[4].shape}")
             for i, d in enumerate(hdtf_train_data):
                 train_data[i] = torch.cat([train_data[i], d], dim=0)
         
