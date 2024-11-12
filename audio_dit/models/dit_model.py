@@ -588,6 +588,7 @@ class DiffLiveHead(nn.Module):
         if total_denoising_steps is None:
             total_denoising_steps = self.diffusion_sched.num_steps
         traj = {total_denoising_steps: motion_at_T}
+        use_og_diffusion = True
         for t in range(total_denoising_steps, 0, -1):
             if t > 1:
                 z = torch.randn_like(motion_at_T)
@@ -621,11 +622,18 @@ class DiffLiveHead(nn.Module):
             results = results.chunk(n_entries)
 
             # Unconditional target (CFG) or the conditional target (non-CFG)
-            target_theta = results[1][:, -self.n_motions:]
+            if use_og_diffusion:
+                target_theta = results[0][:, -self.n_motions:]
+            else:
+                target_theta = results[1][:, -self.n_motions:]
             # Classifier-free Guidance (optional)
             for i in range(0, n_entries - 1):
                 if cfg_mode == 'independent':
-                    target_theta += cfg_scale[i] * (
+                    if use_og_diffusion:
+                        target_theta += cfg_scale[i] * (
+                                    results[i + 1][:, -self.n_motions:] - results[0][:, -self.n_motions:])
+                    else:
+                        target_theta += cfg_scale[i] * (
                                  - results[0][:, -self.n_motions:])
                 elif cfg_mode == 'incremental':
                     target_theta += cfg_scale[i] * (
@@ -641,10 +649,15 @@ class DiffLiveHead(nn.Module):
                 c0 = (1 - alpha_bar_prev) * torch.sqrt(alpha) / (1 - alpha_bar)
                 c1 = (1 - alpha) * torch.sqrt(alpha_bar_prev) / (1 - alpha_bar)
                 motion_next = c0 * motion_at_t + c1 * target_theta + sigma * z
+                # print(f"Step {t}, motion_next: {motion_next[0:1, 20:23, -6:]},\
+                #       motion_at_t: {motion_at_t[0:1, 20:23, -6:]},\
+                #       target_theta: {target_theta[0:1, 20:23, -6:]},\
+                #       z: {z[0:1, 20:23, -6:]}, \n c0: {c0}, c1: {c1}, sigma: {sigma}, alpha: {alpha}, alpha_bar: {alpha_bar}, alpha_bar_prev: {alpha_bar_prev}")
             else:
                 raise ValueError('Unknown target type: {}'.format(self.target))
 
             traj[t - 1] = motion_next.detach()  # Stop gradient and save trajectory.
+            # print(f'traj[t - 1]: last 6: {traj[t - 1][0:1, 20:23, -6:]}')
             traj[t] = traj[t].cpu()  # Move previous output to CPU memory.
             if not ret_traj:
                 del traj[t]
