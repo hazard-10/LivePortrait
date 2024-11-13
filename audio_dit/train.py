@@ -537,26 +537,28 @@ if __name__ == "__main__":
                         help="Type of model to use: 'dit' or 'vanilla'")
     parser.add_argument("-val", "--validate_only", action="store_true",
                         help="Run validation only, without training") # by default training would include validation
-    on_remote = True
+    on_remote = False
     if not on_remote:
         parser.add_argument("-va", "--vox2_audio_root", type=str, default='/mnt/e/data/live_latent/audio_latent/')
         parser.add_argument("-vm", "--vox2_motion_root", type=str, default='/mnt/e/data/live_latent/motion_temp/')
         parser.add_argument("-htn", "--hdtf_train_root", type=str, default="/mnt/e/data/diffposetalk_data/TFHP_raw/train_split/")
         parser.add_argument("-htt", "--hdtf_test_root", type=str, default="/mnt/e/data/diffposetalk_data/TFHP_raw/test_split/")
-        used_dataset = "vox2"
-        parser.add_argument("--vox2_train_end_idx", type=int, default=10)
+        used_dataset = "hdtf"
+        parser.add_argument("--vox2_train_end_idx", type=int, default=387)
     else:
         parser.add_argument("-va", "--vox2_audio_root", type=str, default='/home/ubuntu/vox2-az/audio_latent/')
         parser.add_argument("-vm", "--vox2_motion_root", type=str, default='/home/ubuntu/vox2-az/new_live_latent/')
         parser.add_argument("-htn", "--hdtf_train_root", type=str, default="/home/ubuntu/vox2-az/hdtf/train_split/")
         parser.add_argument("-htt", "--hdtf_test_root", type=str, default="/home/ubuntu/vox2-az/hdtf/test_split/")
-        used_dataset = "vox2/hdtf"
-        parser.add_argument("--vox2_train_end_idx", type=int, default=4200)
+        # used_dataset = "vox2/hdtf"
+        used_dataset = "hdtf"
+        parser.add_argument("--vox2_train_end_idx", type=int, default=387)
+        # parser.add_argument("--vox2_train_end_idx", type=int, default=4200)
     parser.add_argument("-o", "--output_dir", type=str, default="output")
 
     parser.add_argument("--vox2_train_start_idx", type=int, default=0)
-    parser.add_argument("--hdtf_train_start_idx", type=int, default=0)
-    parser.add_argument("--hdtf_train_end_idx", type=int, default=337)
+    parser.add_argument("--hdtf_train_start_idx", type=int, default=170)
+    parser.add_argument("--hdtf_train_end_idx", type=int, default=230)
     parser.add_argument("--vox2_validate_start_idx", type=int, default=4200) # 4200
     parser.add_argument("--dataset", type=str, default=used_dataset) # vox2, hdtf, or both
     parser.add_argument("--vox2_validate_end_idx", type=int, default=4250) # 4617
@@ -573,7 +575,7 @@ if __name__ == "__main__":
             "scheduler": "none",
         },
         10: {
-            "save_interval": 1,
+            "save_interval": 500,
             "lr_min_scale": 0.2,
             "warmup_iters": 600,
             "lr_max_iters": 500000,
@@ -589,12 +591,12 @@ if __name__ == "__main__":
             "scheduler": "none",
         },
         387: {
-            "save_interval": 3,
-            "lr_min_scale": 0.05,
-            "warmup_iters": 5000,
-            "lr_max_iters": 200000,
-            "learning_rate": 2e-5,
-            "scheduler": "warmup",
+            "save_interval": 15,
+            "lr_min_scale": 0.2,
+            "warmup_iters": 10000,
+            "lr_max_iters": 500000,
+            "learning_rate": 5e-5,
+            "scheduler": "warmup_cosine",
         },
         400: {
             "save_interval": 5,
