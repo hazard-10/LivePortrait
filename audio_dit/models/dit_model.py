@@ -623,7 +623,8 @@ class DiffLiveHead(nn.Module):
 
             # Unconditional target (CFG) or the conditional target (non-CFG)
             if use_og_diffusion:
-                target_theta = results[0][:, -self.n_motions:]
+                # target_theta = results[0][:, -self.n_motions:]
+                target_theta = results[1][:, -self.n_motions:]
             else:
                 target_theta = results[1][:, -self.n_motions:]
             # Classifier-free Guidance (optional)
