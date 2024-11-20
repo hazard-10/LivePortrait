@@ -55,9 +55,9 @@ class InferenceManager:
             ).to(self.device)
         else:
             raise ValueError(f"Unknown model type: {self.config['model_type']}")
-            
+
         return model
-    
+
     def load_checkpoint(self, checkpoint_path):
         # Load the state dictionary
         state_dict = torch.load(checkpoint_path, map_location=self.device)
@@ -76,29 +76,29 @@ class InferenceManager:
         print(f"Model checkpoint loaded from {checkpoint_path}")
 
     @torch.no_grad()
-    def inference(self, audio_latent, shape_tensor, prev_motion_feat=None, prev_audio_feat=None, cfg_scale=1.0, mouth_open_ratio=None, denoising_steps=None):
+    def inference(self, audio_latent, shape_tensor, prev_motion_feat=None, prev_audio_feat=None, cfg_scale=1.0, mouth_open_ratio=None, denoising_steps=None, gen_length=None):
         """
         Perform inference on a batch of input audio and shape tensors.
-        
+
         Args:
         - audio_latent (torch.Tensor): Audio latent tensor of shape (B, T, a_dim)
         - shape_tensor (torch.Tensor): Shape tensor of shape (B, x_dim)
         - prev_motion_feat (torch.Tensor, optional): Previous motion features of shape (B, prev_seq_length, x_dim)
         - prev_audio_feat (torch.Tensor, optional): Previous audio features of shape (B, prev_seq_length, a_dim)
-        
+
         Returns:
         - torch.Tensor: Generated motion of shape (B, T, x_dim)
         """
         audio_latent = audio_latent.to(self.device)
         shape_tensor = shape_tensor.to(self.device)
-        
+
         assert prev_audio_feat is not None and prev_motion_feat is not None, "Previous motion and audio features are required for inference"
-        
+
         if prev_motion_feat is not None:
             prev_motion_feat = prev_motion_feat.to(self.device)
         if prev_audio_feat is not None:
             prev_audio_feat = prev_audio_feat.to(self.device)
-        
+
         if self.model_type == 'dit':
             # Call the sample method of the model
             generated_motion = self.model.sample_new(
@@ -108,18 +108,19 @@ class InferenceManager:
                 prev_motion_feat=prev_motion_feat,
                 prev_audio_feat=prev_audio_feat,
                 cfg_scale=cfg_scale,
-                total_denoising_steps=denoising_steps
+                total_denoising_steps=denoising_steps,
+                gen_length=gen_length
             )
         elif self.model_type == 'vanilla':
             x_input = torch.zeros(shape_tensor.shape[0], audio_latent.shape[1], prev_motion_feat.shape[-1]).to(self.device)
             generated_motion = self.model.inference(x_input, prev_motion_feat, audio_latent, prev_audio_feat, shape_tensor)
-        
+
         return generated_motion
 
 # Example usage:
 # def example_inference(inference_manager, audio_latent=None, shape_tensor=None, prev_motion_feat=None, prev_audio_feat=None, cfg_scale=1.0, total_denoising_steps=None):
 #     assert audio_latent is not None and shape_tensor is not None, "Audio and shape tensors are required for inference"
-    
+
 #     generated_motion = inference_manager.inference(audio_latent, shape_tensor, prev_motion_feat, prev_audio_feat, cfg_scale, total_denoising_steps)
 #     print(f"Generated motion shape: {generated_motion.shape}")
 #     return generated_motion
@@ -129,7 +130,7 @@ def get_model(config_path, checkpoint_path, device='cuda'):
         assert False, f"Config file not found at {config_path}"
     if not os.path.exists(checkpoint_path):
         assert False, f"Checkpoint file not found at {checkpoint_path}"
-    
+
     return InferenceManager(config_path, checkpoint_path, device)
 
 if __name__ == "__main__":

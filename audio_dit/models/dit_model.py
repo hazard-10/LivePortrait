@@ -357,7 +357,7 @@ class DiffLiveHead(nn.Module):
                 f'Incorrect audio length {audio_or_feat.shape[1]}'
             audio_feat = self.extract_audio_feature(audio_or_feat)  # (N, L, feature_dim)
         elif audio_or_feat.ndim == 3:
-            assert audio_or_feat.shape[1] == self.n_motions, f'Incorrect audio feature length {audio_or_feat.shape[1]}'
+            # assert audio_or_feat.shape[1] == self.n_motions, f'Incorrect audio feature length {audio_or_feat.shape[1]}'
             audio_feat = audio_or_feat
         else:
             raise ValueError(f'Incorrect audio input shape {audio_or_feat.shape}')
@@ -483,7 +483,7 @@ class DiffLiveHead(nn.Module):
                motion_at_T=None, total_denoising_steps=None, cfg_mode=None,
             #     indicator=None,
                cfg_cond=None, cfg_scale=1, flexibility=0,
-               dynamic_threshold=None, ret_traj=False):
+               dynamic_threshold=None, ret_traj=False, gen_length=None):
         # Check and convert inputs
         batch_size = audio_or_feat.shape[0]
 
@@ -495,6 +495,8 @@ class DiffLiveHead(nn.Module):
         audio_or_feat = self.audio_feature_map(audio_or_feat)
         prev_audio_feat = self.audio_feature_map(prev_audio_feat)
 
+        if gen_length is None:
+            gen_length = self.n_motions
         # Ensure shape_feat is 3D
         # if shape_feat.ndim == 2:
         #     shape_feat = shape_feat.unsqueeze(1)  # (N, 1, d_shape)
@@ -526,11 +528,11 @@ class DiffLiveHead(nn.Module):
 
         if audio_or_feat.ndim == 2:
             # Extract audio features
-            assert audio_or_feat.shape[1] == 16000 * self.n_motions / self.fps, \
+            assert audio_or_feat.shape[1] == 16000 * gen_length / self.fps, \
                 f'Incorrect audio length {audio_or_feat.shape[1]}'
             audio_feat = self.extract_audio_feature(audio_or_feat)  # (N, L, feature_dim)
         elif audio_or_feat.ndim == 3:
-            assert audio_or_feat.shape[1] == self.n_motions, f'Incorrect audio feature length {audio_or_feat.shape[1]}'
+            # assert audio_or_feat.shape[1] == self.n_motions, f'Incorrect audio feature length {audio_or_feat.shape[1]}'
             audio_feat = audio_or_feat
         else:
             raise ValueError(f'Incorrect audio input shape {audio_or_feat.shape}')
@@ -547,11 +549,11 @@ class DiffLiveHead(nn.Module):
             prev_audio_feat = self.start_audio_feat.expand(batch_size, -1, -1)
 
         if motion_at_T is None:
-            motion_at_T = torch.randn((batch_size, self.n_motions, self.motion_feat_dim)).to(self.device)
+            motion_at_T = torch.randn((batch_size, gen_length, self.motion_feat_dim)).to(self.device)
 
         # Prepare input for the reverse diffusion process (including optional classifier-free guidance)
         if 'audio' in cfg_cond:
-            audio_feat_null = self.null_audio_feat.expand(batch_size, self.n_motions, -1)
+            audio_feat_null = self.null_audio_feat.expand(batch_size, gen_length, -1)
         else:
             audio_feat_null = audio_feat
 
@@ -613,7 +615,7 @@ class DiffLiveHead(nn.Module):
             # Apply thresholding if specified
             if dynamic_threshold:
                 dt_ratio, dt_min, dt_max = dynamic_threshold
-                abs_results = results[:, -self.n_motions:].reshape(batch_size * n_entries, -1).abs()
+                abs_results = results[:, -gen_length:].reshape(batch_size * n_entries, -1).abs()
                 s = torch.quantile(abs_results, dt_ratio, dim=1)
                 s = torch.clamp(s, min=dt_min, max=dt_max)
                 s = s[..., None, None]
@@ -623,22 +625,22 @@ class DiffLiveHead(nn.Module):
 
             # Unconditional target (CFG) or the conditional target (non-CFG)
             if use_og_diffusion:
-                # target_theta = results[0][:, -self.n_motions:]
-                target_theta = results[1][:, -self.n_motions:]
+                # target_theta = results[0][:, -gen_length:]
+                target_theta = results[1][:, -gen_length:]
             else:
-                target_theta = results[1][:, -self.n_motions:]
+                target_theta = results[1][:, -gen_length:]
             # Classifier-free Guidance (optional)
             for i in range(0, n_entries - 1):
                 if cfg_mode == 'independent':
                     if use_og_diffusion:
                         target_theta += cfg_scale[i] * (
-                                    results[i + 1][:, -self.n_motions:] - results[0][:, -self.n_motions:])
+                                    results[i + 1][:, -gen_length:] - results[0][:, -gen_length:])
                     else:
                         target_theta += cfg_scale[i] * (
-                                 - results[0][:, -self.n_motions:])
+                                 - results[0][:, -gen_length:])
                 elif cfg_mode == 'incremental':
                     target_theta += cfg_scale[i] * (
-                                results[i + 1][:, -self.n_motions:] - results[i][:, -self.n_motions:])
+                                results[i + 1][:, -gen_length:] - results[i][:, -gen_length:])
                 else:
                     raise NotImplementedError(f'Unknown cfg_mode {cfg_mode}')
 
