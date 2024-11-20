@@ -60,8 +60,8 @@ class TrainingManager:
         self.output_dir = os.path.join(args.output_dir, time.strftime("%m%d-%H-%M-%S"))
         self.checkpoint_dir = args.checkpoint_dir
 
-        self.train_data = train_data # motion_latents, audio_latents, shape_latents, mouth_latents, flag
-        self.val_data = val_data # N datasets of (motion_latents, audio_latents, shape_latents, mouth_latents, flag)
+        self.train_data = train_data # motion_latents, audio_latents, shape_latents, mouth_latents, end_indices
+        self.val_data = val_data # N datasets of (motion_latents, audio_latents, shape_latents, mouth_latents, end_indices)
 
         self.prev_seq_length = 10
         self.data_regulator = None
@@ -252,6 +252,7 @@ class TrainingManager:
         a = batch['audio_latent'].to(self.device)
         s = batch['shape_latent'].to(self.device)
         m = batch['mouth_latent'].to(self.device)
+        end_indices = batch['end_indices'].to(self.device)
         # batch_size = x.shape[0]
 
         x_prev, x_gt = x[:, :self.prev_seq_length], x[:, self.prev_seq_length:]
@@ -278,6 +279,13 @@ class TrainingManager:
             # loss = masked_squared_diff.sum() / non_zero_mask.sum()
             x_pred = self.loss_weight * x_pred
             x_gt = self.loss_weight * x
+
+            batch_size, seq_length, _ = x_gt.shape
+            mask = torch.arange(seq_length, device=self.device).expand(batch_size, seq_length) < end_indices.unsqueeze(1)
+            # Apply the mask to both x_pred and x_gt
+            x_pred = x_pred[mask]
+            x_gt = x_gt[mask]
+
             loss = F.mse_loss(x_pred, x_gt)
 
             loss.backward()
@@ -537,28 +545,31 @@ if __name__ == "__main__":
                         help="Type of model to use: 'dit' or 'vanilla'")
     parser.add_argument("-val", "--validate_only", action="store_true",
                         help="Run validation only, without training") # by default training would include validation
-    on_remote = False
+    on_remote = True
     if not on_remote:
         parser.add_argument("-va", "--vox2_audio_root", type=str, default='/mnt/e/data/live_latent/audio_latent/')
         parser.add_argument("-vm", "--vox2_motion_root", type=str, default='/mnt/e/data/live_latent/motion_temp/')
         parser.add_argument("-htn", "--hdtf_train_root", type=str, default="/mnt/e/data/diffposetalk_data/TFHP_raw/train_split/")
         parser.add_argument("-htt", "--hdtf_test_root", type=str, default="/mnt/e/data/diffposetalk_data/TFHP_raw/test_split/")
         used_dataset = "hdtf"
+        parser.add_argument("--vox2_train_start_idx", type=int, default=0)
         parser.add_argument("--vox2_train_end_idx", type=int, default=387)
+        parser.add_argument("--hdtf_train_start_idx", type=int, default=170)
+        parser.add_argument("--hdtf_train_end_idx", type=int, default=230)
     else:
         parser.add_argument("-va", "--vox2_audio_root", type=str, default='/home/ubuntu/vox2-az/audio_latent/')
         parser.add_argument("-vm", "--vox2_motion_root", type=str, default='/home/ubuntu/vox2-az/new_live_latent/')
         parser.add_argument("-htn", "--hdtf_train_root", type=str, default="/home/ubuntu/vox2-az/hdtf/train_split/")
         parser.add_argument("-htt", "--hdtf_test_root", type=str, default="/home/ubuntu/vox2-az/hdtf/test_split/")
-        # used_dataset = "vox2/hdtf"
-        used_dataset = "hdtf"
-        parser.add_argument("--vox2_train_end_idx", type=int, default=387)
-        # parser.add_argument("--vox2_train_end_idx", type=int, default=4200)
-    parser.add_argument("-o", "--output_dir", type=str, default="output")
+        used_dataset = "vox2/hdtf"
+        # used_dataset = "hdtf"
+        parser.add_argument("--vox2_train_start_idx", type=int, default=0)
+        # parser.add_argument("--vox2_train_end_idx", type=int, default=387)
+        parser.add_argument("--vox2_train_end_idx", type=int, default=4200)
+        parser.add_argument("--hdtf_train_start_idx", type=int, default=0)
+        parser.add_argument("--hdtf_train_end_idx", type=int, default=337)
 
-    parser.add_argument("--vox2_train_start_idx", type=int, default=0)
-    parser.add_argument("--hdtf_train_start_idx", type=int, default=170)
-    parser.add_argument("--hdtf_train_end_idx", type=int, default=230)
+    parser.add_argument("-o", "--output_dir", type=str, default="output")
     parser.add_argument("--vox2_validate_start_idx", type=int, default=4200) # 4200
     parser.add_argument("--dataset", type=str, default=used_dataset) # vox2, hdtf, or both
     parser.add_argument("--vox2_validate_end_idx", type=int, default=4250) # 4617
@@ -634,7 +645,7 @@ if __name__ == "__main__":
     count_key = args.vox2_train_end_idx - args.vox2_train_start_idx
 
     latent_mask_1 = [ 4, 6, 7, 22, 33, 34, 40, 43, 45, 46, 48, 51, 52, 53, 57, 58, 59, 60, 61, 62 ] # deleted 49,
-    loss_weight   = [ 1, 1, 1, 1,  2,  3,  1,  1,  2,  3,  2,  1,  1,  1,  1,  2,  1,  1,  3,  1, ]
+    loss_weight   = [ 1, 1, 1, 1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1, ]
     latent_bound_list =[
         -0.05029296875,        0.0857086181640625,   -0.07587742805480957,  0.058624267578125,   -0.0004341602325439453,  0.00019466876983642578,
         -0.038482666015625,    0.0345458984375,      -0.030120849609375,    0.038360595703125,   -3.0279159545898438e-05, 1.3887882232666016e-05,
@@ -729,8 +740,8 @@ if __name__ == "__main__":
     }
 
     # Load data once in the main process
-    train_data = [torch.Tensor([]) for _ in range(4)]   # motion, audio, shape, mouth
-    val_data = []  # motion, audio, shape, mouth
+    train_data = [torch.Tensor([]) for _ in range(5)]   # motion, audio, shape, mouth, end_indices
+    val_data = []  # motion, audio, shape, mouth, end_indices
     # train_audio_latents, train_motion_latents, train_shape_latents, train_mouth_latents, train_flag_latents, \
     #     val_audio_latents, val_motion_latents, val_shape_latents, val_mouth_latents, val_flag_latents = \
     #     torch.Tensor([]), torch.Tensor([]), torch.Tensor([]),torch.Tensor([]), torch.Tensor([]), [], [], [], [], []
@@ -741,7 +752,7 @@ if __name__ == "__main__":
                                                                         config["motion_latent_type"], config["latent_mask_1"], config["latent_bound"])
         val_data.append(vox2_val_data)
         print(f"Vox2 validation Data loaded. audio shape: {val_data[-1][0].shape}, \
-                motion shape: {val_data[-1][1].shape}, shape shape: {val_data[-1][2].shape}, mouth shape: {val_data[-1][3].shape}")
+                motion shape: {val_data[-1][1].shape}, shape shape: {val_data[-1][2].shape}, mouth shape: {val_data[-1][3].shape}, end_indices shape: {val_data[-1][4].shape}")
         if not config["validate_only"]:
             # Normal Training mode
             vox2_train_data = load_npy_files(args.vox2_audio_root, args.vox2_motion_root,
@@ -750,7 +761,7 @@ if __name__ == "__main__":
             for i, d in enumerate(vox2_train_data):
                 train_data[i] = torch.cat([train_data[i], d], dim=0)
             print(f"Vox2 training Data loaded. audio shape: {train_data[0].shape}, motion shape: {train_data[1].shape}, \
-                                                shape shape: {train_data[2].shape}, mouth shape: {train_data[3].shape}")
+                                                shape shape: {train_data[2].shape}, mouth shape: {train_data[3].shape}, end_indices shape: {train_data[4].shape}")
 
     if "hdtf" in args.dataset:
         train_audio_root = args.hdtf_train_root + "audio_latent/"
@@ -760,13 +771,13 @@ if __name__ == "__main__":
         hdtf_val_data = load_npy_files(test_audio_root, test_motion_root, 0, 8,
                                         config["motion_latent_type"], config["latent_mask_1"], config["latent_bound"]) # load all validation data
         val_data.append(hdtf_val_data)
-        print(f"HDTF validation Data loaded. audio shape: {val_data[-1][0].shape}, motion shape: {val_data[-1][1].shape}, shape shape: {val_data[-1][2].shape}, mouth shape: {val_data[-1][3].shape}")
+        print(f"HDTF validation Data loaded. audio shape: {val_data[-1][0].shape}, motion shape: {val_data[-1][1].shape}, shape shape: {val_data[-1][2].shape}, mouth shape: {val_data[-1][3].shape}, end_indices shape: {val_data[-1][4].shape}")
         if not config["validate_only"]:
             hdtf_train_data = load_npy_files(train_audio_root, train_motion_root,
                                              args.hdtf_train_start_idx, args.hdtf_train_end_idx,
                                              config["motion_latent_type"], config["latent_mask_1"], config["latent_bound"])
             print(f"HDTF training Data loaded. audio shape: {hdtf_train_data[0].shape}, motion shape: {hdtf_train_data[1].shape}, \
-                                                shape shape: {hdtf_train_data[2].shape}, mouth shape: {hdtf_train_data[3].shape}")
+                                                shape shape: {hdtf_train_data[2].shape}, mouth shape: {hdtf_train_data[3].shape}, end_indices shape: {hdtf_train_data[4].shape}")
             for i, d in enumerate(hdtf_train_data):
                 train_data[i] = torch.cat([train_data[i], d], dim=0)
 
