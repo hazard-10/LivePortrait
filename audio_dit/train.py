@@ -96,23 +96,6 @@ class TrainingManager:
                 use_mouth_open_ratio=self.config["use_mouth_open_ratio"],
                 device=self.device
             ).to(self.device)
-        elif self.model_type == "vanilla":
-            self.model = VanillaTransformer(
-                x_dim=self.config["x_dim"],
-                a_dim=self.config["a_dim"],
-                hidden_size=self.config["hidden_size"],
-                num_layers=self.config["num_layers"],
-                num_heads=self.config["num_attention_heads"],
-            ).to(self.device)
-        elif self.model_type == "faceformer":
-            self.model = FaceFormer(
-                x_dim=self.config["x_dim"],
-                a_dim=self.config["a_dim"],
-                hidden_size=self.config["hidden_size"],
-                num_layers=self.config["num_layers"],
-                num_heads=self.config["num_attention_heads"],
-            ).to(self.device)
-
         else:
             raise ValueError(f"Unknown model type: {self.model_type}")
 
@@ -153,38 +136,6 @@ class TrainingManager:
             return GradualWarmupScheduler(self.optimizer, 1, self.config["warmup_iters"])
         else:
             return None
-
-        # elif self.config["model_type"] == "vanilla":
-        #     if self.config["scheduler"] == "none":
-        #         return None
-        #     elif self.config["scheduler"] == "cosine":
-        #         return torch.optim.lr_scheduler.CosineAnnealingLR(
-        #             self.optimizer,
-        #             T_max=self.config["lr_max_iters"],
-        #             eta_min=self.config["learning_rate"] * self.config["lr_min_scale"]
-        #         )
-        #     elif self.config["scheduler"] == "linear":
-        #         return torch.optim.lr_scheduler.LinearLR(
-        #             self.optimizer,
-        #             start_factor=1.0,
-        #             total_iters=self.config["lr_max_iters"],
-        #             end_factor=self.config["lr_min_scale"],
-        #         )
-        #     else:
-        #         raise ValueError(f"Unknown scheduler type: {self.config['scheduler']}")
-
-    # def normalize_features(self, validate=False):
-    #     # Standardize (mean=0, std=1)
-    #     if self.data_regulator is None:
-    #         motion_mean = torch.mean(self.motion_latents, dim=0, keepdim=True)
-    #         motion_std = torch.std(self.motion_latents, dim=0, keepdim=True)
-    #         self.data_regulator = {"motion_mean": motion_mean, "motion_std": motion_std}
-    #         torch.save(self.data_regulator, os.path.join(self.output_dir, "data_regularization.pt"))
-
-    #     if validate:
-    #         self.val_motion_latents = (self.val_motion_latents - self.data_regulator["motion_mean"]) / (self.data_regulator["motion_std"] + 1e-8)
-    #     else:
-    #         self.motion_latents = (self.motion_latents - self.data_regulator["motion_mean"]) / (self.data_regulator["motion_std"] + 1e-8)
 
 
     def run(self):
@@ -274,8 +225,8 @@ class TrainingManager:
         end_indices = batch['end_indices'].to(self.device)
         # batch_size = x.shape[0]
 
-        x_prev, x_gt = x[:, :self.prev_seq_length], x[:, self.prev_seq_length:]
-        a_prev, a_train = a[:, :self.prev_seq_length], a[:, self.prev_seq_length:]
+        x_prev_gt, x_gen_gt = x[:, :self.prev_seq_length], x[:, self.prev_seq_length:]
+        a_prev, a_gen = a[:, :self.prev_seq_length], a[:, self.prev_seq_length:]
         x_shape = s
 
         losses = []
@@ -287,30 +238,23 @@ class TrainingManager:
         # a_prev = a_prev.bfloat16()
         if self.model_type == "dit":
             # by default not use indicator
-
-            noise, x_out, prev_motion_coef, prev_audio_feat = \
-                self.model(motion_feat = x_gt, audio_or_feat = a_train,
+            noise, x_pred, prev_motion_coef, prev_audio_feat = \
+                self.model(motion_feat = x_gen_gt, audio_or_feat = a_gen,
                            shape_feat=x_shape, style_feat=None, mouth_open_ratio = m,
-                           prev_motion_feat = x_prev, prev_audio_feat = a_prev)
-            x_pred = x_out
+                           prev_motion_feat = x_prev_gt, prev_audio_feat = a_prev)
+            x_pred_weighted = self.loss_weight * x_pred
+            x_gt_weighted = self.loss_weight * x_gen_gt
 
-            # non_zero_mask = (x_gt != 0)
-            # squared_diff = (x_pred - x_gt) ** 2
-            # masked_squared_diff = squared_diff * non_zero_mask
-            # loss = masked_squared_diff.sum() / non_zero_mask.sum()
-            x_pred = self.loss_weight * x_pred
-            x_gt = self.loss_weight * x
-
-            batch_size, seq_length, _ = x_gt.shape
+            batch_size, seq_length, _ = x_gen_gt.shape
             mask = torch.arange(seq_length, device=self.device).expand(batch_size, seq_length) < end_indices.unsqueeze(1)
             # Apply the mask to both x_pred and x_gt
-            x_pred = x_pred[mask]
-            x_gt = x_gt[mask]
+            x_pred_weighted = x_pred_weighted[mask]
+            x_gt_weighted = x_gt_weighted[mask]
 
-            loss = F.mse_loss(x_pred, x_gt)
+            loss = F.mse_loss(x_pred_weighted, x_gt_weighted)
             losses.append(loss.detach())
             if self.use_vel_loss:
-                vel_gt = x_gt[1:] - x_gt[:-1]
+                vel_gt = x_gen_gt[1:] - x_gen_gt[:-1]
                 vel_pred = x_pred[1:] - x_pred[:-1]
                 vel_loss = F.mse_loss(vel_pred, vel_gt)
                 acc_loss = F.mse_loss(vel_pred[1:], vel_pred[:-1])
