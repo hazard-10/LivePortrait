@@ -67,6 +67,9 @@ class TrainingManager:
         self.data_regulator = None
 
         self.loss_weight = torch.tensor(self.config["loss_weight"]).to(self.device)
+        self.use_vel_loss = self.config["use_vel_loss"]
+        self.vel_loss_weight = torch.tensor(self.config["vel_loss_weight"]).to(self.device)
+        self.acc_loss_weight = torch.tensor(self.config["acc_loss_weight"]).to(self.device)
 
         if self.rank == 0 and not self.config["validate_only"]:
             os.makedirs(self.output_dir, exist_ok=True)
@@ -213,14 +216,26 @@ class TrainingManager:
         for epoch in epoch_pbar:
             self.dataloader.sampler.set_epoch(epoch)
             batch_loss = torch.zeros(1).to(self.device)
+            batch_vel_loss = torch.zeros(1).to(self.device)
+            batch_acc_loss = torch.zeros(1).to(self.device)
             mini_batch_pbar = tqdm(self.dataloader, desc=f"Epoch {epoch+1}", leave=False, disable=self.rank != 0)
             # mini_batch_pbar = self.dataloader
             for mini_batch in mini_batch_pbar:
-                loss = self.train_step(mini_batch)
+                losses = self.train_step(mini_batch)
+                if self.use_vel_loss:
+                    loss = losses[0]
+                    vel_loss = losses[1]
+                    acc_loss = losses[2]
+                else:
+                    loss = losses[0]
+                    vel_loss = 0
+                    acc_loss = 0
                 # Sum the total loss across all processes
                 reduce(loss, dst=0, op=torch.distributed.ReduceOp.SUM)
                 loss /= self.world_size
                 batch_loss += loss
+                batch_vel_loss += vel_loss
+                batch_acc_loss += acc_loss
                 current_lr = self.optimizer.param_groups[0]['lr']
 
                 if self.rank == 0:
@@ -228,12 +243,16 @@ class TrainingManager:
                     self.lr_during_training.append(current_lr)
                 self.iteration += 1
                 if self.iteration % 10 == 0:
-                    mini_batch_pbar.set_postfix({"Loss": f"{loss.item():.2e}", "LR": f"{current_lr:.6e}"})
+                    mini_batch_pbar.set_postfix({"Loss": f"{loss.item():.2e}", "Vel Loss": f"{vel_loss.item():.2e}",
+                                                 "Acc Loss": f"{acc_loss.item():.2e}", "LR": f"{current_lr:.6e}"})
 
             if self.rank == 0:
                 avg_loss = batch_loss.item() / (len(self.dataloader) * self.world_size)
-                self.epoch_losses.append(avg_loss)
-                epoch_pbar.set_postfix({"Avg Loss": f"{avg_loss:.2e}", "LR": f"{current_lr:.6e}"})
+                avg_vel_loss = batch_vel_loss.item() / (len(self.dataloader) * self.world_size)
+                avg_acc_loss = batch_acc_loss.item() / (len(self.dataloader) * self.world_size)
+                self.epoch_losses.append([avg_loss, avg_vel_loss, avg_acc_loss])
+                epoch_pbar.set_postfix({"Avg Loss": f"{avg_loss:.2e}", "Avg Vel Loss": f"{avg_vel_loss:.2e}",
+                                        "Avg Acc Loss": f"{avg_acc_loss:.2e}", "LR": f"{current_lr:.6e}"})
 
             if (epoch + 1) % self.config["save_interval"] == 0 and self.rank == 0:
                 val_loss, val_feature_loss = self.validate()
@@ -258,6 +277,8 @@ class TrainingManager:
         x_prev, x_gt = x[:, :self.prev_seq_length], x[:, self.prev_seq_length:]
         a_prev, a_train = a[:, :self.prev_seq_length], a[:, self.prev_seq_length:]
         x_shape = s
+
+        losses = []
         # t1 = time.time()
         # Convert inputs to BF16
         # x_gt = x_gt.bfloat16()
@@ -287,38 +308,25 @@ class TrainingManager:
             x_gt = x_gt[mask]
 
             loss = F.mse_loss(x_pred, x_gt)
+            losses.append(loss.detach())
+            if self.use_vel_loss:
+                vel_gt = x_gt[1:] - x_gt[:-1]
+                vel_pred = x_pred[1:] - x_pred[:-1]
+                vel_loss = F.mse_loss(vel_pred, vel_gt)
+                acc_loss = F.mse_loss(vel_pred[1:], vel_pred[:-1])
+                loss += self.vel_loss_weight * vel_loss + self.acc_loss_weight * acc_loss
+                losses.append(vel_loss.detach())
+                losses.append(acc_loss.detach())
 
             loss.backward()
             self.optimizer.step()
             if self.lr_scheduler and self.iteration < self.config["lr_max_iters"] + self.config["warmup_iters"]:
                 self.lr_scheduler.step()
-
-        elif self.model_type == "vanilla":
-            # with autocast(dtype=torch.bfloat16):
-            x_input = torch.zeros_like(x_gt)  # Zero out the motion data for now
-            x_pred = self.model(x_input, x_prev, a_train, a_prev, x_shape)
-            loss = F.mse_loss(x_pred, x_gt)
-
-            loss.backward()
-            self.optimizer.step()
-
-            if self.lr_scheduler:
-                # self.scaler.step(self.optimizer)
-                self.lr_scheduler.step()
-            # self.scaler.update()
-        elif self.model_type == "faceformer":
-            x_pred = self.model(x_gt, x_prev, a_train, a_prev, x_shape)
-            loss = F.mse_loss(x_pred, x[:, :-1, :])
-            loss.backward()
-            self.optimizer.step()
-            if self.lr_scheduler:
-                self.lr_scheduler.step()
-
         # torch.cuda.synchronize()
         # t2 = time.time()
         # if self.rank == 0:
         #     print(f"Data prep time: {(t1 - t0) * 1000:.2f}ms, Forward pass time: {(t2 - t1) * 1000:.2f}ms")
-        return loss.detach()
+        return losses
 
     def save_checkpoint(self, epoch):
         checkpoint_dir = os.path.join(self.output_dir, f"checkpoint_epoch_{epoch}")
@@ -718,6 +726,9 @@ if __name__ == "__main__":
         # condition parameter
         "use_shape_feat": True, # whether to use condition
         "use_mouth_open_ratio": True, # condition type, concat or add
+        "use_vel_loss": True,
+        "vel_loss_weight": 2.0,
+        "acc_loss_weight": 2.0,
         # dataset parameters
         "dataset": args.dataset,
         "motion_latent_type": "exp",  # Motion latent type. Accept ["exp", "x_d"]
