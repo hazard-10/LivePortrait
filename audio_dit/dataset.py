@@ -35,52 +35,62 @@ How data loading works in this project:
 '''
 Part 1: Load and process the npy files
 '''
-def load_and_process_pair(audio_file, motion_file, latent_type='exp', latent_mask_1=None, latent_bound=None):
+def load_and_process_pair(audio_file, motion_file, config=None):
+    # @ 11/26/2024, audio file contains B, 75, 768, while motion file is Bm, 136, where B * 75 == Bm
     # Load audio file
     # Check the type of audio_file
     if isinstance(audio_file, (str, os.PathLike)):
         # If it's a string (file path), load the audio data
-        audio_data = np.load(audio_file)
-    elif isinstance(audio_file, (np.ndarray, torch.Tensor)):
+        audio_tensor = torch.from_numpy(np.load(audio_file))
+    elif isinstance(audio_file, (np.ndarray)):
         # If it's already a numpy array or torch tensor, use it as is
-        audio_data = audio_file
+        audio_tensor = torch.from_numpy(audio_file)
+    elif isinstance(audio_file, torch.Tensor):
+        audio_tensor = audio_file
+    audio_first_tensor = audio_tensor[0]
+    audio_rest_tensor = audio_tensor[1:, 10:].reshape(-1, 768)
+    audio_tensor = torch.cat([audio_first_tensor,
+                            audio_rest_tensor
+                            ], dim=0)
+    # now audio is Ba, 768, where Ba should be close to or same as Bm
+
+    # check context len
+    if 'prev_len_per_window' in config and 'gen_len_per_window' in config:
+        prev_len_per_window = config["prev_len_per_window"]
+        gen_len_per_window = config["gen_len_per_window"]
     else:
-        # If it's neither a string nor a numpy array/torch tensor, raise an error
-        raise ValueError("audio_file must be a file path string, numpy array, or torch tensor")
+        prev_len_per_window = 10
+        gen_len_per_window = 65
+    total_len_per_window = prev_len_per_window + gen_len_per_window
+    assert total_len_per_window == 75, "prev_len_per_window + gen_len_per_window must be 75"
 
     # Load and process motion file
-    motion_data = np.load(motion_file)
-    pad_length = (65 - (motion_data.shape[0] - 10) % 65) % 65
-    padded_data = np.pad(motion_data, ((0, pad_length), (0, 0)), mode='constant')
+    # | prev_len_per_window | gen_len_per_window | gen_len_per_window | gen_len_per_window | ...
+    motion_tensor = torch.from_numpy(np.load(motion_file))
+    pad_length = (gen_len_per_window - (motion_tensor.shape[0] - prev_len_per_window) % gen_len_per_window) % gen_len_per_window
+    motion_tensor = torch.nn.functional.pad(motion_tensor, (0, 0, 0, pad_length), mode='constant', value=0)
 
-    data_without_first_10 = padded_data[10:]
-    N = data_without_first_10.shape[0] // 65
-    reshaped_data = data_without_first_10[:N*65].reshape(N, 65, 136)
-    last_10 = reshaped_data[:, -10:, :]
-    prev_10 = np.concatenate([padded_data[:10][None, :, :], last_10[:-1]], axis=0)
-    motion_data = np.concatenate([prev_10, reshaped_data], axis=1)
+    # unfold motion and audio to specific window size
+    motion_tensor = motion_tensor.unfold(0, total_len_per_window, gen_len_per_window)
+    motion_tensor = motion_tensor.transpose(1, 2)
+    audio_tensor = audio_tensor.unfold(0, total_len_per_window, gen_len_per_window)
+    audio_tensor = audio_tensor.transpose(1, 2)
 
-    end_indices = torch.ones(N, dtype=torch.int32) * (motion_data.shape[1] - 1)
-    end_indices[-1] = motion_data.shape[1] - 1 - pad_length
+    end_indices = torch.ones(motion_tensor.shape[0], dtype=torch.int32) * (motion_tensor.shape[1] - 1)
+    end_indices[-1] = motion_tensor.shape[1] - 1 - pad_length
 
     # Ensure audio and motion data have the same number of frames.
     # Prev lookup show 1 frame mismatch is common. In this case we only fix batch size mismatch
-    min_frames = min(audio_data.shape[0], motion_data.shape[0])
-    audio_data = audio_data[:min_frames]
-    motion_data = motion_data[:min_frames]
+    min_frames = min(audio_tensor.shape[0], motion_tensor.shape[0])
+    audio_tensor = audio_tensor[:min_frames]
+    motion_tensor = motion_tensor[:min_frames]
     end_indices = end_indices[:min_frames]
 
-    motion_tensor = torch.from_numpy(motion_data)
-    if isinstance(audio_data, np.ndarray):
-        audio_tensor = torch.from_numpy(audio_data)
-    elif isinstance(audio_data, torch.Tensor):
-        audio_tensor = audio_data
-
-    motion_tensor, audio_tensor, shape_tensor, mouth_tensor = process_motion_tensor(motion_tensor, audio_tensor, latent_type, latent_mask_1, latent_bound)
+    motion_tensor, audio_tensor, shape_tensor, mouth_tensor = process_motion_tensor(motion_tensor, audio_tensor, config)
 
     return motion_tensor, audio_tensor, shape_tensor, mouth_tensor, end_indices
 
-def process_directory(uid, audio_root, motion_root, latent_type='exp', latent_mask_1=None, latent_bound=None):
+def process_directory(uid, audio_root, motion_root, config=None):
     audio_dir = os.path.join(audio_root, uid)
     motion_dir = os.path.join(motion_root, uid)
 
@@ -104,7 +114,7 @@ def process_directory(uid, audio_root, motion_root, latent_type='exp', latent_ma
         audio_path = os.path.join(audio_dir, audio_file)
         motion_path = os.path.join(motion_dir, motion_file)
 
-        motion_tensor, audio_tensor, shape_tensor, mouth_tensor, end_indices = load_and_process_pair(audio_path, motion_path, latent_type, latent_mask_1, latent_bound)
+        motion_tensor, audio_tensor, shape_tensor, mouth_tensor, end_indices = load_and_process_pair(audio_path, motion_path, config)
         motion_tensor_list.append(motion_tensor)
         audio_tensor_list.append(audio_tensor)
         shape_tensor_list.append(shape_tensor)
@@ -114,7 +124,9 @@ def process_directory(uid, audio_root, motion_root, latent_type='exp', latent_ma
     return torch.cat(motion_tensor_list, dim=0), torch.cat(audio_tensor_list, dim=0), torch.cat(shape_tensor_list, dim=0), \
             torch.cat(mouth_tensor_list, dim=0), torch.cat(end_indices_list, dim=0)
 
-def load_npy_files(audio_root, motion_root, start_idx=None, end_idx=None, latent_type='exp', latent_mask_1=None, latent_bound=None):
+def load_npy_files(audio_root, motion_root, start_idx=None, end_idx=None, config=None):
+    assert config is not None, "config is required in load_npy_files"
+
     all_dir_list = sorted(os.listdir(audio_root))
     if start_idx is not None and end_idx is not None:
         dir_list = all_dir_list[start_idx:end_idx]
@@ -127,7 +139,7 @@ def load_npy_files(audio_root, motion_root, start_idx=None, end_idx=None, latent
     all_mouth_data = []
     all_end_indices = []
     with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
-        future_to_uid = {executor.submit(process_directory, uid, audio_root, motion_root, latent_type, latent_mask_1, latent_bound): uid for uid in dir_list}
+        future_to_uid = {executor.submit(process_directory, uid, audio_root, motion_root, config): uid for uid in dir_list}
 
         for future in tqdm(as_completed(future_to_uid), total=len(dir_list), desc="Processing directories"):
             uid = future_to_uid[future]
@@ -228,7 +240,12 @@ def get_rotation_matrix(pitch_, yaw_, roll_):
     return rot.permute(0, 2, 1)  # transpose
 
 @torch.no_grad()
-def process_motion_tensor(motion_tensor, audio_tensor, latent_type='exp', latent_mask_1=None, latent_bound=None):
+def process_motion_tensor(motion_tensor, audio_tensor, config=None):
+    assert config is not None, "config is required in process_motion_tensor"
+    latent_type = config["motion_latent_type"]
+    latent_mask_1 = config["latent_mask_1"]
+    latent_bound = config["latent_bound"]
+
     device = motion_tensor.device
     n_batches, seq_len, _ = motion_tensor.shape
     all_in_bound = torch.ones(n_batches, seq_len, dtype=torch.bool)

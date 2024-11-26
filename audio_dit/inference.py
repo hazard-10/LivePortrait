@@ -11,11 +11,9 @@ sys.path.append(project_root)
 try:
     # Try relative import (for when used as a package)
     from .models.dit_model import DiffLiveHead
-    from .models.vanilla_transformer import VanillaTransformer
 except ImportError:
     # If relative import fails, try absolute import (for when run directly)
     from models.dit_model import DiffLiveHead
-    from models.vanilla_transformer import VanillaTransformer
 
 class InferenceManager:
     def __init__(self, config_path, checkpoint_path, device='cuda'):
@@ -47,14 +45,6 @@ class InferenceManager:
                 use_repeat_token=self.config["use_repeat_token"],
                 repeat_len=self.config["repeat_len"],
                 device=self.device
-            ).to(self.device)
-        elif self.model_type == "vanilla":
-            model = VanillaTransformer(
-                x_dim=self.config["x_dim"],
-                a_dim=self.config["a_dim"],
-                hidden_size=self.config["hidden_size"],
-                num_layers=self.config["num_layers"],
-                num_heads=self.config["num_attention_heads"],
             ).to(self.device)
         else:
             raise ValueError(f"Unknown model type: {self.config['model_type']}")
@@ -114,9 +104,6 @@ class InferenceManager:
                 total_denoising_steps=denoising_steps,
                 gen_length=gen_length
             )
-        elif self.model_type == 'vanilla':
-            x_input = torch.zeros(shape_tensor.shape[0], audio_latent.shape[1], prev_motion_feat.shape[-1]).to(self.device)
-            generated_motion = self.model.inference(x_input, prev_motion_feat, audio_latent, prev_audio_feat, shape_tensor)
 
         return generated_motion
 
