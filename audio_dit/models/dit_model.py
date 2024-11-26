@@ -109,9 +109,11 @@ class DiffLiveHead(nn.Module):
                  use_learnable_pe=False,
                  use_shape_feat=False,
                  use_mouth_open_ratio=False,
+                 use_repeat_token=False,
                  n_motions = 65,
                  n_prev_motions = 10,
                  n_diff_steps = 50,
+                 repeat_len=1,
                  diff_schedule='cosine', # choices=['linear', 'cosine', 'quadratic', 'sigmoid']
                  cfg_mode = 'independent', # choices=['incremental', 'independent']
                  guiding_conditions = ['audio'], # choices=['audio', 'style']
@@ -139,6 +141,10 @@ class DiffLiveHead(nn.Module):
 
         # self.start_audio_feat = nn.Parameter(torch.randn(1, self.n_prev_motions, self.hidden_dim))
         # self.start_motion_feat = nn.Parameter(torch.randn(1, self.n_prev_motions, self.motion_feat_dim))
+        self.use_repeat_token = use_repeat_token
+        if self.use_repeat_token:
+            self.repeat_len = repeat_len
+            self.repeat_audio_feat = nn.Parameter(torch.randn(1, self.repeat_len, self.hidden_dim))
 
         # Diffusion model
         self.denoising_net = DenoisingNetwork(x_dim=self.motion_feat_dim,
@@ -152,9 +158,11 @@ class DiffLiveHead(nn.Module):
                                               use_learnable_pe=use_learnable_pe,
                                               use_shape_feat=self.use_shape_feat,
                                               use_mouth_open_ratio=self.use_mouth_open_ratio,
+                                              use_repeat_token=self.use_repeat_token,
                                               n_motions=n_motions,
                                               n_prev_motions=n_prev_motions,
                                               n_diff_steps=n_diff_steps,
+                                              repeat_len=repeat_len,
                                               device=device)
         # diffusion schedule
         self.diffusion_sched = DiffusionSchedule(n_diff_steps, mode=diff_schedule)
@@ -245,6 +253,11 @@ class DiffLiveHead(nn.Module):
                                              self.null_audio_feat.expand(batch_size, self.n_motions, -1),
                                              audio_feat)
 
+        if self.use_repeat_token:
+            audio_feat = torch.cat([self.repeat_audio_feat.expand(batch_size, -1, -1), audio_feat], dim=1)
+            # (N, L_p + repeat_len + L, feature_dim)
+            # doesn't get masked out by cfg
+
         # if style_feat is None and shape_feat is not None:
         #     # The model only accepts audio and shape features, i.e., self.use_style = False
         #     person_feat = shape_feat
@@ -290,6 +303,9 @@ class DiffLiveHead(nn.Module):
 
         if gen_length is None:
             gen_length = self.n_motions
+        motion_gen_len = gen_length
+        if self.use_repeat_token:
+            motion_gen_len += self.repeat_len
         # Ensure shape_feat is 3D
         # if shape_feat.ndim == 2:
         #     shape_feat = shape_feat.unsqueeze(1)  # (N, 1, d_shape)
@@ -350,6 +366,12 @@ class DiffLiveHead(nn.Module):
         else:
             audio_feat_null = audio_feat
 
+        if self.use_repeat_token:
+            audio_feat_null = torch.cat([self.repeat_audio_feat.expand(batch_size, -1, -1), audio_feat_null], dim=1)
+            # (N, L_p + repeat_len + L, feature_dim)
+            # doesn't get masked out by cfg
+            audio_feat = torch.cat([self.repeat_audio_feat.expand(batch_size, -1, -1), audio_feat], dim=1)
+
         # if 'style' in cfg_cond:
         #     person_feat_null = torch.cat([shape_feat, self.null_style_feat.expand(batch_size, -1, -1)], dim=-1)
         # else:
@@ -399,6 +421,9 @@ class DiffLiveHead(nn.Module):
             motion_in = torch.cat([motion_at_t] * n_entries, dim=0)
             step_in = torch.tensor([t] * batch_size, device=self.device)
             step_in = torch.cat([step_in] * n_entries, dim=0)
+
+            if self.use_repeat_token:
+                motion_in = torch.cat([prev_motion_feat_in[:, -self.repeat_len:, :], motion_in], dim=1)
 
             results = self.denoising_net(
                 motion_feat = motion_in, audio_feat = audio_feat_in,
@@ -477,9 +502,11 @@ class DenoisingNetwork(nn.Module):
                  use_learnable_pe=False,
                  use_mouth_open_ratio=False,
                  use_shape_feat=False,
+                 use_repeat_token=False,
                  n_motions = 65,
                  n_prev_motions = 10,
                  n_diff_steps = 50,
+                 repeat_len=1,
                  device='cuda'):
         super().__init__()
 
@@ -500,6 +527,9 @@ class DenoisingNetwork(nn.Module):
         # sequence length
         self.n_prev_motions = n_prev_motions
         self.n_motions = n_motions
+        # repeat token
+        self.use_repeat_token = use_repeat_token
+        self.repeat_len = repeat_len
 
         # Temporal embedding for the diffusion time step
         self.TE = PositionalEncoding(self.feature_dim, max_len=n_diff_steps + 1)
@@ -529,7 +559,10 @@ class DenoisingNetwork(nn.Module):
         self.transformer = nn.TransformerDecoder(decoder_layer, num_layers=self.n_layers)
         if self.align_mask_width > 0:
             motion_len = self.n_prev_motions + self.n_motions
-            alignment_mask = enc_dec_mask(motion_len, motion_len, 1, self.align_mask_width - 1)
+            if self.use_repeat_token:
+                motion_len += self.repeat_len
+
+            alignment_mask = enc_dec_mask(motion_len, motion_len, frame_width=1, expansion=self.align_mask_width - 1)
             alignment_mask = F.pad(alignment_mask, (0, 0, 1, 0), value=False)
             self.register_buffer('alignment_mask', alignment_mask)
         else:
@@ -576,13 +609,13 @@ class DenoisingNetwork(nn.Module):
             indicator = indicator.unsqueeze(-1)  # (N, L_p + L, 1)
 
         # Concat features and embeddings
-        feats_in = torch.cat([prev_motion_feat, motion_feat], dim=1)  # (N, L_p + L, d_motion)
+        feats_in = torch.cat([prev_motion_feat, motion_feat], dim=1)  # (N, L_p + L, d_motion), or (N, L_p + repeat_len + L, d_motion)
 
         if self.use_indicator:
             feats_in = torch.cat([feats_in, indicator], dim=-1)  # (N, L_p + L, d_motion + d_audio + 1)
 
         feats_in = self.feature_proj(feats_in)  # (N, L_p + L, feature_dim)
-        feats_in = torch.cat([cond_feat, feats_in], dim=1)  # (N, 1 + L_p + L, feature_dim)
+        feats_in = torch.cat([cond_feat, feats_in], dim=1)  # (N, 1 + L_p + L, feature_dim) or (N, 1 + L_p + repeat_len + L, feature_dim)
 
         if self.use_learnable_pe:
             feats_in = feats_in + self.PE
@@ -594,6 +627,6 @@ class DenoisingNetwork(nn.Module):
         feat_out = self.transformer(feats_in, audio_feat_in, memory_mask=self.alignment_mask)
 
         # Decode predicted motion feature noise / sample
-        motion_feat_target = self.motion_dec(feat_out[:, 1:])  # (N, L_p + L, d_motion)
+        motion_feat_target = self.motion_dec(feat_out[:, 1:])  # (N, L_p + L, d_motion) or (N, L_p + repeat_len + L, d_motion)
 
         return motion_feat_target

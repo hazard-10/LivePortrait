@@ -70,6 +70,9 @@ class TrainingManager:
         self.use_vel_loss = self.config["use_vel_loss"]
         self.vel_loss_weight = torch.tensor(self.config["vel_loss_weight"]).to(self.device)
         self.acc_loss_weight = torch.tensor(self.config["acc_loss_weight"]).to(self.device)
+        self.use_repeat_token = self.config["use_repeat_token"]
+        self.repeat_loss_weight = torch.tensor(self.config["repeat_loss_weight"]).to(self.device)
+        self.repeat_len = self.config["repeat_len"]
 
         if self.rank == 0 and not self.config["validate_only"]:
             os.makedirs(self.output_dir, exist_ok=True)
@@ -91,9 +94,12 @@ class TrainingManager:
                 feature_dim=self.config["hidden_size"],
                 n_heads = self.config["num_attention_heads"],
                 n_layers=self.config["num_layers"],
+                align_mask_width=self.config["align_mask_width"],
                 n_diff_steps = self.config["n_diff_steps"],
                 use_shape_feat=self.config["use_shape_feat"],
                 use_mouth_open_ratio=self.config["use_mouth_open_ratio"],
+                use_repeat_token=self.config["use_repeat_token"],
+                repeat_len=self.config["repeat_len"],
                 device=self.device
             ).to(self.device)
         else:
@@ -169,24 +175,29 @@ class TrainingManager:
             batch_loss = torch.zeros(1).to(self.device)
             batch_vel_loss = torch.zeros(1).to(self.device)
             batch_acc_loss = torch.zeros(1).to(self.device)
+            batch_repeat_loss = torch.zeros(1).to(self.device)
             mini_batch_pbar = tqdm(self.dataloader, desc=f"Epoch {epoch+1}", leave=False, disable=self.rank != 0)
             # mini_batch_pbar = self.dataloader
             for mini_batch in mini_batch_pbar:
                 losses = self.train_step(mini_batch)
+                loss = losses[0]
                 if self.use_vel_loss:
-                    loss = losses[0]
                     vel_loss = losses[1]
                     acc_loss = losses[2]
                 else:
-                    loss = losses[0]
                     vel_loss = 0
                     acc_loss = 0
+                if self.use_repeat_token:
+                    repeat_loss = losses[3]
+                else:
+                    repeat_loss = 0
                 # Sum the total loss across all processes
                 reduce(loss, dst=0, op=torch.distributed.ReduceOp.SUM)
                 loss /= self.world_size
                 batch_loss += loss
                 batch_vel_loss += vel_loss
                 batch_acc_loss += acc_loss
+                batch_repeat_loss += repeat_loss
                 current_lr = self.optimizer.param_groups[0]['lr']
 
                 if self.rank == 0:
@@ -195,15 +206,16 @@ class TrainingManager:
                 self.iteration += 1
                 if self.iteration % 10 == 0:
                     mini_batch_pbar.set_postfix({"Loss": f"{loss.item():.2e}", "Vel Loss": f"{vel_loss.item():.2e}",
-                                                 "Acc Loss": f"{acc_loss.item():.2e}", "LR": f"{current_lr:.6e}"})
+                                                 "Acc Loss": f"{acc_loss.item():.2e}", "Repeat Loss": f"{repeat_loss.item():.2e}", "LR": f"{current_lr:.6e}"})
 
             if self.rank == 0:
                 avg_loss = batch_loss.item() / (len(self.dataloader) * self.world_size)
                 avg_vel_loss = batch_vel_loss.item() / (len(self.dataloader) * self.world_size)
                 avg_acc_loss = batch_acc_loss.item() / (len(self.dataloader) * self.world_size)
-                self.epoch_losses.append([avg_loss, avg_vel_loss, avg_acc_loss])
+                avg_repeat_loss = batch_repeat_loss.item() / (len(self.dataloader) * self.world_size)
+                self.epoch_losses.append([avg_loss, avg_vel_loss, avg_acc_loss, avg_repeat_loss])
                 epoch_pbar.set_postfix({"Avg Loss": f"{avg_loss:.2e}", "Avg Vel Loss": f"{avg_vel_loss:.2e}",
-                                        "Avg Acc Loss": f"{avg_acc_loss:.2e}", "LR": f"{current_lr:.6e}"})
+                                        "Avg Acc Loss": f"{avg_acc_loss:.2e}", "Avg Repeat Loss": f"{avg_repeat_loss:.2e}", "LR": f"{current_lr:.6e}"})
 
             if (epoch + 1) % self.config["save_interval"] == 0 and self.rank == 0:
                 val_loss, val_feature_loss = self.validate()
@@ -229,6 +241,12 @@ class TrainingManager:
         a_prev, a_gen = a[:, :self.prev_seq_length], a[:, self.prev_seq_length:]
         x_shape = s
 
+        if self.use_repeat_token:
+            x_repeat_gt = x_prev_gt[:, -self.repeat_len:] # repeat last few frames of previous motion
+            x_gen_gt_repeated = torch.cat([x_repeat_gt, x_gen_gt], dim=1)
+            # only repeat motion, audio will have according special token written in dit_model.py
+        else:
+            x_gen_gt_repeated = x_gen_gt
         losses = []
         # t1 = time.time()
         # Convert inputs to BF16
@@ -239,13 +257,19 @@ class TrainingManager:
         if self.model_type == "dit":
             # by default not use indicator
             noise, x_pred, prev_motion_coef, prev_audio_feat = \
-                self.model(motion_feat = x_gen_gt, audio_or_feat = a_gen,
+                self.model(motion_feat = x_gen_gt_repeated, audio_or_feat = a_gen,
                            shape_feat=x_shape, style_feat=None, mouth_open_ratio = m,
                            prev_motion_feat = x_prev_gt, prev_audio_feat = a_prev)
-            x_pred_weighted = self.loss_weight * x_pred
-            x_gt_weighted = self.loss_weight * x_gen_gt
+            if self.use_repeat_token:
+                x_repeat_pred = x_pred[:, self.prev_seq_length: self.prev_seq_length + self.repeat_len]
+                repeat_loss = F.mse_loss(x_repeat_pred, x_repeat_gt)
+                # carve out the repeated part, x_pred_len is L_p + repeat_len + L
+                x_pred = torch.cat([x_pred[:, :self.prev_seq_length], x_pred[:, self.prev_seq_length + self.repeat_len:]], dim=1)
 
-            batch_size, seq_length, _ = x_gen_gt.shape
+            x_pred_weighted = self.loss_weight * x_pred
+            x_gt_weighted = self.loss_weight * x
+
+            batch_size, seq_length, _ = x_gt_weighted.shape
             mask = torch.arange(seq_length, device=self.device).expand(batch_size, seq_length) < end_indices.unsqueeze(1)
             # Apply the mask to both x_pred and x_gt
             x_pred_weighted = x_pred_weighted[mask]
@@ -254,13 +278,16 @@ class TrainingManager:
             loss = F.mse_loss(x_pred_weighted, x_gt_weighted)
             losses.append(loss.detach())
             if self.use_vel_loss:
-                vel_gt = x_gen_gt[1:] - x_gen_gt[:-1]
+                vel_gt = x[1:] - x[:-1]
                 vel_pred = x_pred[1:] - x_pred[:-1]
                 vel_loss = F.mse_loss(vel_pred, vel_gt)
                 acc_loss = F.mse_loss(vel_pred[1:], vel_pred[:-1])
                 loss += self.vel_loss_weight * vel_loss + self.acc_loss_weight * acc_loss
                 losses.append(vel_loss.detach())
                 losses.append(acc_loss.detach())
+            if self.use_repeat_token:
+                loss += repeat_loss * self.repeat_loss_weight
+                losses.append(repeat_loss.detach())
 
             loss.backward()
             self.optimizer.step()
@@ -373,32 +400,45 @@ class TrainingManager:
                     s = batch['shape_latent'].to(self.device)
                     m = batch['mouth_latent'].to(self.device)
 
-                    x_prev, x_gt = x[:, :self.prev_seq_length], x[:, self.prev_seq_length:]
-                    a_prev, a_train = a[:, :self.prev_seq_length], a[:, self.prev_seq_length:]
+                    x_prev_gt, x_gen_gt = x[:, :self.prev_seq_length], x[:, self.prev_seq_length:]
+                    a_prev, a_gen = a[:, :self.prev_seq_length], a[:, self.prev_seq_length:]
                     x_shape = s
+
+                    if self.use_repeat_token:
+                        x_repeat_gt = x_prev_gt[:, -self.repeat_len:] # repeat last few frames of previous motion
+                        x_gen_gt_repeated = torch.cat([x_repeat_gt, x_gen_gt], dim=1)
+                        # only repeat motion, audio will have according special token written in dit_model.py
+                    else:
+                        x_gen_gt_repeated = x_gen_gt
                     if self.model_type == "dit":
-                        noise, x_out, prev_motion_coef, prev_audio_feat = \
-                            self.model(x_gt, a_train, shape_feat=x_shape, style_feat=None, mouth_open_ratio = m,
-                            prev_motion_feat = x_prev, prev_audio_feat = a_prev)
-                        x_pred = x_out
+                        noise, x_pred, prev_motion_coef, prev_audio_feat = \
+                            self.model(motion_feat = x_gen_gt_repeated, audio_or_feat = a_gen,
+                            shape_feat=x_shape, style_feat=None, mouth_open_ratio = m,
+                            prev_motion_feat = x_prev_gt, prev_audio_feat = a_prev)
+                        if self.use_repeat_token:
+                            # x_repeat_pred = x_pred[:, self.prev_seq_length: self.prev_seq_length + self.repeat_len]
+                            # repeat_loss = F.mse_loss(x_repeat_pred, x_repeat_gt)
+                            # carve out the repeated part, x_pred_len is L_p + repeat_len + L
+                            x_pred = torch.cat([x_pred[:, :self.prev_seq_length], x_pred[:, self.prev_seq_length + self.repeat_len:]], dim=1)
+
                         mse_loss = F.mse_loss(x_pred, x)
                         l1_abs_loss = torch.abs(x_pred - x)
 
-                    elif self.model_type == "vanilla":
-                        x_input = torch.zeros_like(x_gt)
-                        x_pred = self.model.module.inference(x_input, x_prev, a_train, a_prev, x_shape)
+                    # elif self.model_type == "vanilla":
+                    #     x_input = torch.zeros_like(x_gt)
+                    #     x_pred = self.model.module.inference(x_input, x_prev, a_train, a_prev, x_shape)
 
-                        # Calculate loss for each feature dimension
-                        mse_loss = F.mse_loss(x_pred, x_gt)
-                        l1_abs_loss = torch.abs(x_pred - x_gt)
+                    #     # Calculate loss for each feature dimension
+                    #     mse_loss = F.mse_loss(x_pred, x_gt)
+                    #     l1_abs_loss = torch.abs(x_pred - x_gt)
 
-                    elif self.model_type == "faceformer":
-                        x_pred = self.model(x_gt, x_prev, a_train, a_prev, x_shape)
-                        mse_loss = F.mse_loss(x_pred, x[:, :-1, :])
-                        l1_abs_loss = torch.abs(x_pred - x_gt)
+                    # elif self.model_type == "faceformer":
+                    #     x_pred = self.model(x_gt, x_prev, a_train, a_prev, x_shape)
+                    #     mse_loss = F.mse_loss(x_pred, x[:, :-1, :])
+                    #     l1_abs_loss = torch.abs(x_pred - x_gt)
 
                     l1_abs_loss = l1_abs_loss.reshape(l1_abs_loss.shape[0] * l1_abs_loss.shape[1], -1) # (batch_size * seq_len, kp * 3)
-                    x_gt_reshaped = x_gt.reshape(x_gt.shape[0] * x_gt.shape[1], -1) # (batch_size * seq_len, kp * 3)
+                    x_gt_reshaped = x.reshape(x.shape[0] * x.shape[1], -1) # (batch_size * seq_len, kp * 3)
                     x_pred_reshaped = x_pred.reshape(x_pred.shape[0] * x_pred.shape[1], -1) # (batch_size * seq_len, kp * 3)
                     feature_losses.append(l1_abs_loss.cpu().numpy())
                     all_val_info.append(x_gt_reshaped.cpu().numpy())
@@ -597,7 +637,7 @@ if __name__ == "__main__":
     count_key = args.vox2_train_end_idx - args.vox2_train_start_idx
 
     latent_mask_1 = [ 4, 6, 7, 22, 33, 34, 40, 43, 45, 46, 48, 51, 52, 53, 57, 58, 59, 60, 61, 62 ] # deleted 49,
-    loss_weight   = [ 1, 1, 1, 1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1, ]
+    loss_weight   = [ 1, 1, 1, 1,  2,  3,  1,  1,  2,  3,  2,  1,  1,  1,  1,  2,  1,  1,  3,  1, ]
     latent_bound_list =[
         -0.05029296875,        0.0857086181640625,   -0.07587742805480957,  0.058624267578125,   -0.0004341602325439453,  0.00019466876983642578,
         -0.038482666015625,    0.0345458984375,      -0.030120849609375,    0.038360595703125,   -3.0279159545898438e-05, 1.3887882232666016e-05,
@@ -655,6 +695,7 @@ if __name__ == "__main__":
         "hidden_size": 512,  # Hidden size for the transformer
         "num_layers": 8,  # Number of transformer layers
         "num_attention_heads": 8,  # Number of attention heads
+        "align_mask_width": 1,
         # Training parameters
         "n_diff_steps" : 50, # Number of diffusion steps
         "batch_size": 32,  # Batch size for training
@@ -671,8 +712,11 @@ if __name__ == "__main__":
         "use_shape_feat": True, # whether to use condition
         "use_mouth_open_ratio": True, # condition type, concat or add
         "use_vel_loss": True,
-        "vel_loss_weight": 2.0,
-        "acc_loss_weight": 2.0,
+        "vel_loss_weight": 0.2,
+        "acc_loss_weight": 0.1,
+        "use_repeat_token": True,
+        "repeat_loss_weight": 0.1,
+        "repeat_len": 1,
         # dataset parameters
         "dataset": args.dataset,
         "motion_latent_type": "exp",  # Motion latent type. Accept ["exp", "x_d"]
