@@ -22,6 +22,8 @@ os.environ['MASTER_PORT'] = '12355'
 torch.manual_seed(3)
 
 from models.dit_model import DiffLiveHead
+from models.vanilla_transformer import VanillaTransformer
+from models.faceformer import FaceFormer
 from dataset import load_npy_files, process_motion_tensor, MotionAudioDataset
 
 def setup(rank, world_size):
@@ -61,7 +63,7 @@ class TrainingManager:
         self.train_data = train_data # motion_latents, audio_latents, shape_latents, mouth_latents, end_indices
         self.val_data = val_data # N datasets of (motion_latents, audio_latents, shape_latents, mouth_latents, end_indices)
 
-        self.prev_seq_length = self.config["prev_len_per_window"]
+        self.prev_seq_length = 10
         self.data_regulator = None
 
         self.loss_weight = torch.tensor(self.config["loss_weight"]).to(self.device)
@@ -97,8 +99,6 @@ class TrainingManager:
                 use_shape_feat=self.config["use_shape_feat"],
                 use_mouth_open_ratio=self.config["use_mouth_open_ratio"],
                 use_repeat_token=self.config["use_repeat_token"],
-                n_motions = self.config["gen_len_per_window"],
-                n_prev_motions = self.config["prev_len_per_window"],
                 repeat_len=self.config["repeat_len"],
                 device=self.device
             ).to(self.device)
@@ -130,6 +130,7 @@ class TrainingManager:
             print(f"No checkpoint found in {self.checkpoint_dir}")
 
     def get_scheduler(self):
+        # if self.config["model_type"] == "dit" or self.config["model_type"] == "faceformer":
         if self.config["scheduler"] == "warmup_cosine":
             from scheduler import GradualWarmupScheduler
             after_scheduler = optim.lr_scheduler.CosineAnnealingLR(self.optimizer, self.config["lr_max_iters"],
@@ -184,12 +185,12 @@ class TrainingManager:
                     vel_loss = losses[1]
                     acc_loss = losses[2]
                 else:
-                    vel_loss = torch.zeros(1).to(self.device)
-                    acc_loss = torch.zeros(1).to(self.device)
+                    vel_loss = 0
+                    acc_loss = 0
                 if self.use_repeat_token:
                     repeat_loss = losses[3]
                 else:
-                    repeat_loss = torch.zeros(1).to(self.device)
+                    repeat_loss = 0
                 # Sum the total loss across all processes
                 reduce(loss, dst=0, op=torch.distributed.ReduceOp.SUM)
                 loss /= self.world_size
@@ -423,6 +424,19 @@ class TrainingManager:
                         mse_loss = F.mse_loss(x_pred, x)
                         l1_abs_loss = torch.abs(x_pred - x)
 
+                    # elif self.model_type == "vanilla":
+                    #     x_input = torch.zeros_like(x_gt)
+                    #     x_pred = self.model.module.inference(x_input, x_prev, a_train, a_prev, x_shape)
+
+                    #     # Calculate loss for each feature dimension
+                    #     mse_loss = F.mse_loss(x_pred, x_gt)
+                    #     l1_abs_loss = torch.abs(x_pred - x_gt)
+
+                    # elif self.model_type == "faceformer":
+                    #     x_pred = self.model(x_gt, x_prev, a_train, a_prev, x_shape)
+                    #     mse_loss = F.mse_loss(x_pred, x[:, :-1, :])
+                    #     l1_abs_loss = torch.abs(x_pred - x_gt)
+
                     l1_abs_loss = l1_abs_loss.reshape(l1_abs_loss.shape[0] * l1_abs_loss.shape[1], -1) # (batch_size * seq_len, kp * 3)
                     x_gt_reshaped = x.reshape(x.shape[0] * x.shape[1], -1) # (batch_size * seq_len, kp * 3)
                     x_pred_reshaped = x_pred.reshape(x_pred.shape[0] * x_pred.shape[1], -1) # (batch_size * seq_len, kp * 3)
@@ -519,8 +533,8 @@ if __name__ == "__main__":
                         help="Directory containing checkpoint files (model.pth and optimizer.pth)")
     parser.add_argument("--world_size", type=int, default=torch.cuda.device_count(),
                         help="Number of GPUs to use")
-    parser.add_argument("--model_type", type=str, choices=["dit"], default="dit",
-                        help="Type of model to use: 'dit'")
+    parser.add_argument("--model_type", type=str, choices=["dit", "vanilla", "faceformer"], default="dit",
+                        help="Type of model to use: 'dit' or 'vanilla'")
     parser.add_argument("-val", "--validate_only", action="store_true",
                         help="Run validation only, without training") # by default training would include validation
     on_remote = True
@@ -674,8 +688,6 @@ if __name__ == "__main__":
 
     config = {
         # Model parameters
-        "prev_len_per_window": 45,
-        "gen_len_per_window": 30,
         "model_type" : args.model_type,
         "x_dim": len(latent_mask_1),
         "person_dim": 63,  # Dimension for person latent
@@ -683,7 +695,7 @@ if __name__ == "__main__":
         "hidden_size": 512,  # Hidden size for the transformer
         "num_layers": 8,  # Number of transformer layers
         "num_attention_heads": 8,  # Number of attention heads
-        "align_mask_width": 5,
+        "align_mask_width": 1,
         # Training parameters
         "n_diff_steps" : 50, # Number of diffusion steps
         "batch_size": 32,  # Batch size for training
@@ -699,11 +711,11 @@ if __name__ == "__main__":
         # condition parameter
         "use_shape_feat": True, # whether to use condition
         "use_mouth_open_ratio": True, # condition type, concat or add
-        "use_vel_loss": False,
-        "vel_loss_weight": 0.0,
-        "acc_loss_weight": 0.0,
-        "use_repeat_token": False,
-        "repeat_loss_weight": 0.,
+        "use_vel_loss": True,
+        "vel_loss_weight": 0.2,
+        "acc_loss_weight": 0.1,
+        "use_repeat_token": True,
+        "repeat_loss_weight": 0.1,
         "repeat_len": 1,
         # dataset parameters
         "dataset": args.dataset,
@@ -735,40 +747,40 @@ if __name__ == "__main__":
 
     if "vox2" in args.dataset:
         vox2_val_data = load_npy_files(args.vox2_audio_root, args.vox2_motion_root,
-                                       args.vox2_validate_start_idx, args.vox2_validate_end_idx,
-                                       config)
+                                                                         args.vox2_validate_start_idx, args.vox2_validate_end_idx,
+                                                                        config["motion_latent_type"], config["latent_mask_1"], config["latent_bound"])
         val_data.append(vox2_val_data)
-        print(f"Vox2 validation Data loaded. motion shape: {val_data[-1][0].shape}, \
-                audio shape: {val_data[-1][1].shape}, shape shape: {val_data[-1][2].shape}, mouth shape: {val_data[-1][3].shape}, end_indices shape: {val_data[-1][4].shape}")
+        print(f"Vox2 validation Data loaded. audio shape: {val_data[-1][0].shape}, \
+                motion shape: {val_data[-1][1].shape}, shape shape: {val_data[-1][2].shape}, mouth shape: {val_data[-1][3].shape}, end_indices shape: {val_data[-1][4].shape}")
         if not config["validate_only"]:
             # Normal Training mode
             vox2_train_data = load_npy_files(args.vox2_audio_root, args.vox2_motion_root,
-                                            args.vox2_train_start_idx, args.vox2_train_end_idx,
-                                            config)
+                                             args.vox2_train_start_idx, args.vox2_train_end_idx,
+                                             config["motion_latent_type"], config["latent_mask_1"], config["latent_bound"])
             for i, d in enumerate(vox2_train_data):
                 train_data[i] = torch.cat([train_data[i], d], dim=0)
-            print(f"Vox2 training Data loaded. motion shape: {train_data[0].shape}, \
-                                                audio shape: {train_data[1].shape}, shape shape: {train_data[2].shape}, mouth shape: {train_data[3].shape}, end_indices shape: {train_data[4].shape}")
+            print(f"Vox2 training Data loaded. audio shape: {train_data[0].shape}, motion shape: {train_data[1].shape}, \
+                                                shape shape: {train_data[2].shape}, mouth shape: {train_data[3].shape}, end_indices shape: {train_data[4].shape}")
 
     if "hdtf" in args.dataset:
         train_audio_root = args.hdtf_train_root + "audio_latent/"
         train_motion_root = args.hdtf_train_root + "live_latent/"
         test_audio_root = args.hdtf_test_root + "audio_latent/"
         test_motion_root = args.hdtf_test_root + "live_latent/"
-        hdtf_val_data = load_npy_files(test_audio_root, test_motion_root, 0, 8, config) # load all validation data, 0 to 8 is the random split out testset size
+        hdtf_val_data = load_npy_files(test_audio_root, test_motion_root, 0, 8,
+                                        config["motion_latent_type"], config["latent_mask_1"], config["latent_bound"]) # load all validation data
         val_data.append(hdtf_val_data)
-        print(f"HDTF validation Data loaded. motion shape: {val_data[-1][0].shape}, \
-                audio shape: {val_data[-1][1].shape}, shape shape: {val_data[-1][2].shape}, mouth shape: {val_data[-1][3].shape}, end_indices shape: {val_data[-1][4].shape}")
+        print(f"HDTF validation Data loaded. audio shape: {val_data[-1][0].shape}, motion shape: {val_data[-1][1].shape}, shape shape: {val_data[-1][2].shape}, mouth shape: {val_data[-1][3].shape}, end_indices shape: {val_data[-1][4].shape}")
         if not config["validate_only"]:
             hdtf_train_data = load_npy_files(train_audio_root, train_motion_root,
-                                            args.hdtf_train_start_idx, args.hdtf_train_end_idx,
-                                            config)
-            print(f"HDTF training Data loaded. motion shape: {hdtf_train_data[0].shape}, \
-                                                audio shape: {hdtf_train_data[1].shape}, shape shape: {hdtf_train_data[2].shape}, mouth shape: {hdtf_train_data[3].shape}, end_indices shape: {hdtf_train_data[4].shape}")
+                                             args.hdtf_train_start_idx, args.hdtf_train_end_idx,
+                                             config["motion_latent_type"], config["latent_mask_1"], config["latent_bound"])
+            print(f"HDTF training Data loaded. audio shape: {hdtf_train_data[0].shape}, motion shape: {hdtf_train_data[1].shape}, \
+                                                shape shape: {hdtf_train_data[2].shape}, mouth shape: {hdtf_train_data[3].shape}, end_indices shape: {hdtf_train_data[4].shape}")
             for i, d in enumerate(hdtf_train_data):
                 train_data[i] = torch.cat([train_data[i], d], dim=0)
 
 
     torch.multiprocessing.spawn(rank_entrance, args=(args.world_size, args, config,
                                                      train_data, val_data ),
-                                                     nprocs=args.world_size)
+                                nprocs=args.world_size)

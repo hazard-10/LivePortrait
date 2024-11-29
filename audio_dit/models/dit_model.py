@@ -110,8 +110,8 @@ class DiffLiveHead(nn.Module):
                  use_shape_feat=False,
                  use_mouth_open_ratio=False,
                  use_repeat_token=False,
-                 n_motions = None,
-                 n_prev_motions = None,
+                 n_motions = 65,
+                 n_prev_motions = 10,
                  n_diff_steps = 50,
                  repeat_len=1,
                  diff_schedule='cosine', # choices=['linear', 'cosine', 'quadratic', 'sigmoid']
@@ -177,8 +177,6 @@ class DiffLiveHead(nn.Module):
         if 'audio' in self.guiding_conditions:
             audio_feat_dim = self.hidden_dim
             self.null_audio_feat = nn.Parameter(torch.randn(1, 1, audio_feat_dim))
-        self.null_prev_motion_feat = nn.Parameter(torch.randn(1, 1, self.motion_feat_dim))
-        self.null_prev_audio_feat = nn.Parameter(torch.randn(1, 1, audio_feat_dim))
 
         self.to(device)
 
@@ -240,16 +238,6 @@ class DiffLiveHead(nn.Module):
                     audio_feat = torch.where(mask_audio.view(-1, 1, 1),
                                              self.null_audio_feat.expand(batch_size, self.n_motions, -1),
                                              audio_feat)
-
-                null_prev_prob = 0.3
-                mask_prev_motion = torch.rand(batch_size, device=self.device) < null_prev_prob
-                prev_motion_feat = torch.where(mask_prev_motion.view(-1, 1, 1),
-                                               self.null_prev_motion_feat.expand(batch_size, self.n_prev_motions, -1),
-                                               prev_motion_feat)
-                mask_prev_audio = torch.rand(batch_size, device=self.device) < null_prev_prob
-                prev_audio_feat = torch.where(mask_prev_audio.view(-1, 1, 1),
-                                              self.null_prev_audio_feat.expand(batch_size, self.n_prev_motions, -1),
-                                              prev_audio_feat)
             else:
                 # len(self.guiding_conditions) > 1 and self.cfg_mode == 'incremental'
                 # full (0.45), w/o style (0.45), w/o style or audio (0.1)
