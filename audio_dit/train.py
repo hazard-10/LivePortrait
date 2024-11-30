@@ -185,12 +185,12 @@ class TrainingManager:
                     vel_loss = losses[1]
                     acc_loss = losses[2]
                 else:
-                    vel_loss = 0
-                    acc_loss = 0
+                    vel_loss = torch.zeros(1).to(self.device)
+                    acc_loss = torch.zeros(1).to(self.device)
                 if self.use_repeat_token:
                     repeat_loss = losses[3]
                 else:
-                    repeat_loss = 0
+                    repeat_loss = torch.zeros(1).to(self.device)
                 # Sum the total loss across all processes
                 reduce(loss, dst=0, op=torch.distributed.ReduceOp.SUM)
                 loss /= self.world_size
@@ -278,10 +278,16 @@ class TrainingManager:
             loss = F.mse_loss(x_pred_weighted, x_gt_weighted)
             losses.append(loss.detach())
             if self.use_vel_loss:
-                vel_gt = x[1:] - x[:-1]
-                vel_pred = x_pred[1:] - x_pred[:-1]
-                vel_loss = F.mse_loss(vel_pred, vel_gt)
-                acc_loss = F.mse_loss(vel_pred[1:], vel_pred[:-1])
+                # vel_gt = x[1:] - x[:-1]
+                # vel_pred = x_pred[1:] - x_pred[:-1]
+                # vel_loss = F.mse_loss(vel_pred, vel_gt)
+                # acc_loss = F.mse_loss(vel_pred[1:], vel_pred[:-1])
+                temporal_x = x[:, self.prev_seq_length-2:self.prev_seq_length+1]
+                temporal_x_pred = x_pred[:, self.prev_seq_length-2:self.prev_seq_length+1]
+                temporal_x_vel = temporal_x[:, 1:] - temporal_x[:, :-1]
+                temporal_x_pred_vel = temporal_x_pred[:, 1:] - temporal_x_pred[:, :-1]
+                vel_loss = F.mse_loss(temporal_x_pred_vel, temporal_x_vel)
+                acc_loss = F.mse_loss(temporal_x_pred_vel[:, 1:], temporal_x_pred_vel[:, :-1])
                 loss += self.vel_loss_weight * vel_loss + self.acc_loss_weight * acc_loss
                 losses.append(vel_loss.detach())
                 losses.append(acc_loss.detach())
@@ -712,10 +718,10 @@ if __name__ == "__main__":
         "use_shape_feat": True, # whether to use condition
         "use_mouth_open_ratio": True, # condition type, concat or add
         "use_vel_loss": True,
-        "vel_loss_weight": 0.2,
-        "acc_loss_weight": 0.1,
-        "use_repeat_token": True,
-        "repeat_loss_weight": 0.1,
+        "vel_loss_weight": 0,
+        "acc_loss_weight": 0.05,
+        "use_repeat_token": False,
+        "repeat_loss_weight": 0.,
         "repeat_len": 1,
         # dataset parameters
         "dataset": args.dataset,

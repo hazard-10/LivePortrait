@@ -417,7 +417,7 @@ class DiffLiveHead(nn.Module):
             alpha_bar_prev = self.diffusion_sched.alpha_bars[t - 1]
             sigma = self.diffusion_sched.get_sigmas(t, flexibility)
 
-            motion_at_t = traj[t]
+            motion_at_t = traj[t][0] if len(traj[t]) == 2 else traj[t]
             motion_in = torch.cat([motion_at_t] * n_entries, dim=0)
             step_in = torch.tensor([t] * batch_size, device=self.device)
             step_in = torch.cat([step_in] * n_entries, dim=0)
@@ -440,7 +440,7 @@ class DiffLiveHead(nn.Module):
                 results = torch.clamp(results, min=-s, max=s)
 
             results = results.chunk(n_entries)
-
+            null_results = results[0][:, -gen_length:]
             # Unconditional target (CFG) or the conditional target (non-CFG)
             if use_og_diffusion:
                 # target_theta = results[0][:, -gen_length:]
@@ -477,9 +477,9 @@ class DiffLiveHead(nn.Module):
             else:
                 raise ValueError('Unknown target type: {}'.format(self.target))
 
-            traj[t - 1] = motion_next.detach()  # Stop gradient and save trajectory.
+            traj[t - 1] = (motion_next.detach(), null_results.detach())  # Stop gradient and save trajectory.
             # print(f'traj[t - 1]: last 6: {traj[t - 1][0:1, 20:23, -6:]}')
-            traj[t] = traj[t].cpu()  # Move previous output to CPU memory.
+            traj[t] = (traj[t][0].cpu(), traj[t][1].cpu()) if len(traj[t]) == 2 else traj[t][0].cpu()  # Move previous output to CPU memory.
             if not ret_traj:
                 del traj[t]
 

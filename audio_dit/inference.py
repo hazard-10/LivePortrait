@@ -41,11 +41,11 @@ class InferenceManager:
                 feature_dim=self.config["hidden_size"],
                 n_heads=self.config["num_attention_heads"],
                 n_layers=self.config["num_layers"],
-                align_mask_width=self.config["align_mask_width"],
+                align_mask_width=self.config["align_mask_width"] if "align_mask_width" in self.config else 1,
                 use_shape_feat=self.config["use_shape_feat"],
-                use_mouth_open_ratio=self.config["use_mouth_open_ratio"],
-                use_repeat_token=self.config["use_repeat_token"],
-                repeat_len=self.config["repeat_len"],
+                use_mouth_open_ratio=self.config["use_mouth_open_ratio"] if "use_mouth_open_ratio" in self.config else True,
+                use_repeat_token=self.config["use_repeat_token"] if "use_repeat_token" in self.config else False,
+                repeat_len=self.config["repeat_len"] if "repeat_len" in self.config else 1,
                 device=self.device
             ).to(self.device)
         elif self.model_type == "vanilla":
