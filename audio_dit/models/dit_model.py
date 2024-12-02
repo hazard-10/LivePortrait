@@ -110,6 +110,7 @@ class DiffLiveHead(nn.Module):
                  use_shape_feat=False,
                  use_mouth_open_ratio=False,
                  use_repeat_token=False,
+                 use_mean_exp=False,
                  n_motions = 65,
                  n_prev_motions = 10,
                  n_diff_steps = 50,
@@ -129,6 +130,7 @@ class DiffLiveHead(nn.Module):
         self.use_shape_feat = use_shape_feat
         self.use_mouth_open_ratio = use_mouth_open_ratio
 
+        self.use_mean_exp = use_mean_exp
         self.fps = fps
         self.n_motions = n_motions
         self.n_prev_motions = n_prev_motions
@@ -159,6 +161,7 @@ class DiffLiveHead(nn.Module):
                                               use_shape_feat=self.use_shape_feat,
                                               use_mouth_open_ratio=self.use_mouth_open_ratio,
                                               use_repeat_token=self.use_repeat_token,
+                                              use_mean_exp=self.use_mean_exp,
                                               n_motions=n_motions,
                                               n_prev_motions=n_prev_motions,
                                               n_diff_steps=n_diff_steps,
@@ -184,7 +187,7 @@ class DiffLiveHead(nn.Module):
     def device(self):
         return next(self.parameters()).device
 
-    def forward(self, motion_feat, audio_or_feat, shape_feat=None, style_feat=None, mouth_open_ratio=None,
+    def forward(self, motion_feat, audio_or_feat, shape_feat=None, style_feat=None, mouth_open_ratio=None, mean_exp=None,
                 prev_motion_feat=None, prev_audio_feat=None, time_step=None, indicator=None):
         """
         Args:
@@ -211,7 +214,8 @@ class DiffLiveHead(nn.Module):
 
         prev_audio_feat = self.audio_feature_map(prev_audio_feat)  # (N, L_p, feature_dim)
         audio_feat = self.audio_feature_map(audio_or_feat)  # (N, L_p + L, feature_dim)
-
+        if self.use_mean_exp:
+            full_null_audio_feat = self.null_audio_feat.expand(batch_size, self.n_motions, -1)
         # if shape_feat.ndim == 2:
         #     shape_feat = shape_feat.unsqueeze(1)  # (N, 1, d_shape)
         # if style_feat is not None and style_feat.ndim == 2:
@@ -276,16 +280,26 @@ class DiffLiveHead(nn.Module):
         eps = torch.randn_like(motion_feat)  # (N, L, d_motion)
         motion_feat_noisy = c0 * motion_feat + c1 * eps
 
+        if self.use_mean_exp:
+            motion_feat_noisy = torch.cat([motion_feat_noisy, motion_feat_noisy], dim=0)
+            audio_feat = torch.cat([audio_feat, full_null_audio_feat], dim=0)
+            prev_motion_feat = torch.cat([prev_motion_feat, prev_motion_feat], dim=0)
+            prev_audio_feat = torch.cat([prev_audio_feat, prev_audio_feat], dim=0)
+            shape_feat = torch.cat([shape_feat, shape_feat], dim=0)
+            mouth_open_ratio = torch.cat([mouth_open_ratio, mouth_open_ratio], dim=0)
+            mean_exp = torch.cat([mean_exp, mean_exp], dim=0)
+
+
         # The reverse diffusion process
         motion_feat_target = self.denoising_net(motion_feat_noisy, audio_feat,
                                                 prev_motion_feat, prev_audio_feat, time_step, indicator,
-                                                shape_feat, mouth_open_ratio)
+                                                shape_feat, mouth_open_ratio, mean_exp)
 
         return eps, motion_feat_target, motion_feat.detach(), audio_feat.detach()
 
     @torch.no_grad()
     def sample_new(self, audio_or_feat, shape_feat, style_feat=None, mouth_open_ratio=None,
-                   prev_motion_feat=None, prev_audio_feat=None,
+                   prev_motion_feat=None, prev_audio_feat=None, mean_exp=None,
                motion_at_T=None, total_denoising_steps=None, cfg_mode=None,
             #     indicator=None,
                cfg_cond=None, cfg_scale=1, flexibility=0,
@@ -400,6 +414,7 @@ class DiffLiveHead(nn.Module):
         person_feat_in = torch.cat(person_feat_in, dim=0)
         prev_motion_feat_in = torch.cat([prev_motion_feat] * n_entries, dim=0)
         prev_audio_feat_in = torch.cat([prev_audio_feat] * n_entries, dim=0)
+        mean_exp_in = torch.cat([mean_exp] * n_entries, dim=0) if mean_exp is not None else None
         # indicator_in = torch.cat([indicator] * n_entries, dim=0) if indicator is not None else None
 
         if total_denoising_steps is None:
@@ -428,7 +443,7 @@ class DiffLiveHead(nn.Module):
             results = self.denoising_net(
                 motion_feat = motion_in, audio_feat = audio_feat_in,
                 prev_motion_feat = prev_motion_feat_in, prev_audio_feat = prev_audio_feat_in,
-                step = step_in, indicator=None, shape_feat=shape_feat, mouth_open_ratio=mouth_open_ratio)
+                step = step_in, indicator=None, shape_feat=shape_feat, mouth_open_ratio=mouth_open_ratio, mean_exp=mean_exp_in)
 
             # Apply thresholding if specified
             if dynamic_threshold:
@@ -503,6 +518,7 @@ class DenoisingNetwork(nn.Module):
                  use_mouth_open_ratio=False,
                  use_shape_feat=False,
                  use_repeat_token=False,
+                 use_mean_exp=False,
                  n_motions = 65,
                  n_prev_motions = 10,
                  n_diff_steps = 50,
@@ -530,6 +546,8 @@ class DenoisingNetwork(nn.Module):
         # repeat token
         self.use_repeat_token = use_repeat_token
         self.repeat_len = repeat_len
+        # mean exp
+        self.use_mean_exp = use_mean_exp
 
         # Temporal embedding for the diffusion time step
         self.TE = PositionalEncoding(self.feature_dim, max_len=n_diff_steps + 1)
@@ -549,6 +567,8 @@ class DenoisingNetwork(nn.Module):
             self.shape_proj = nn.Linear(self.shape_feat_dim, self.feature_dim)
         if use_mouth_open_ratio:
             self.mouth_open_ratio_proj = nn.Linear(1, self.feature_dim)
+        if use_mean_exp:
+            self.mean_exp_proj = nn.Linear(self.motion_feat_dim, self.feature_dim)
 
         # Transformer decoder
         self.feature_proj = nn.Linear(self.motion_feat_dim + (1 if self.use_indicator else 0),
@@ -579,7 +599,8 @@ class DenoisingNetwork(nn.Module):
     def device(self):
         return next(self.parameters()).device
 
-    def forward(self, motion_feat, audio_feat, prev_motion_feat, prev_audio_feat, step, indicator=None, shape_feat=None, mouth_open_ratio=None):
+    def forward(self, motion_feat, audio_feat, prev_motion_feat, prev_audio_feat, step,
+                indicator=None, shape_feat=None, mouth_open_ratio=None, mean_exp=None, is_inference=True):
         """
         Args:
             motion_feat: (N, L, d_motion). Noisy motion feature
@@ -595,13 +616,19 @@ class DenoisingNetwork(nn.Module):
         """
         # Diffusion time step embedding
         diff_step_embedding = self.diff_step_map(self.TE.pe[0, step]).unsqueeze(1)  # (N, 1, diff_step_dim)
-        cond_feat = diff_step_embedding
+        if not is_inference:
+            cond_feat = diff_step_embedding if not self.use_mean_exp else torch.cat([diff_step_embedding, diff_step_embedding], dim=0)
+        else:
+            cond_feat = diff_step_embedding
         if self.use_shape_feat:
             shape_feat = self.shape_proj(shape_feat).unsqueeze(1)  # (N, 1, feature_dim)
             cond_feat += shape_feat
         if self.use_mouth_open_ratio:
             mouth_open_feat = self.mouth_open_ratio_proj(mouth_open_ratio).unsqueeze(1)  # (N, 1, feature_dim)
             cond_feat += mouth_open_feat
+        if self.use_mean_exp:
+            mean_exp_feat = self.mean_exp_proj(mean_exp).unsqueeze(1)  # (N, 1, feature_dim)
+            cond_feat += mean_exp_feat
 
         if indicator is not None:
             indicator = torch.cat([torch.zeros((indicator.shape[0], self.n_prev_motions), device=indicator.device),
