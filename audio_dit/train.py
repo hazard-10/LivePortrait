@@ -73,6 +73,8 @@ class TrainingManager:
         self.use_repeat_token = self.config["use_repeat_token"]
         self.repeat_loss_weight = torch.tensor(self.config["repeat_loss_weight"]).to(self.device)
         self.repeat_len = self.config["repeat_len"]
+        self.use_mean_exp = self.config["use_mean_exp"]
+        self.null_loss_weight = torch.tensor(self.config["null_loss_weight"]).to(self.device)
 
         if self.rank == 0 and not self.config["validate_only"]:
             os.makedirs(self.output_dir, exist_ok=True)
@@ -99,6 +101,7 @@ class TrainingManager:
                 use_shape_feat=self.config["use_shape_feat"],
                 use_mouth_open_ratio=self.config["use_mouth_open_ratio"],
                 use_repeat_token=self.config["use_repeat_token"],
+                use_mean_exp=self.config["use_mean_exp"],
                 repeat_len=self.config["repeat_len"],
                 device=self.device
             ).to(self.device)
@@ -176,21 +179,24 @@ class TrainingManager:
             batch_vel_loss = torch.zeros(1).to(self.device)
             batch_acc_loss = torch.zeros(1).to(self.device)
             batch_repeat_loss = torch.zeros(1).to(self.device)
+            batch_null_loss = torch.zeros(1).to(self.device)
             mini_batch_pbar = tqdm(self.dataloader, desc=f"Epoch {epoch+1}", leave=False, disable=self.rank != 0)
             # mini_batch_pbar = self.dataloader
             for mini_batch in mini_batch_pbar:
                 losses = self.train_step(mini_batch)
                 loss = losses[0]
+                vel_loss = losses[1]
+                acc_loss = losses[2]
+                repeat_loss = losses[3]
+                null_loss = losses[4]
+                mini_batch_pbar_postfix = {"Loss": f"{loss.item():.2e}"}
                 if self.use_vel_loss:
-                    vel_loss = losses[1]
-                    acc_loss = losses[2]
-                else:
-                    vel_loss = torch.zeros(1).to(self.device)
-                    acc_loss = torch.zeros(1).to(self.device)
+                    mini_batch_pbar_postfix["Vel Loss"] = f"{vel_loss.item():.2e}"
+                    mini_batch_pbar_postfix["Acc Loss"] = f"{acc_loss.item():.2e}"
                 if self.use_repeat_token:
-                    repeat_loss = losses[3]
-                else:
-                    repeat_loss = torch.zeros(1).to(self.device)
+                    mini_batch_pbar_postfix["Repeat Loss"] = f"{repeat_loss.item():.2e}"
+                if self.use_mean_exp:
+                    mini_batch_pbar_postfix["Null Loss"] = f"{null_loss.item():.2e}"
                 # Sum the total loss across all processes
                 reduce(loss, dst=0, op=torch.distributed.ReduceOp.SUM)
                 loss /= self.world_size
@@ -198,29 +204,40 @@ class TrainingManager:
                 batch_vel_loss += vel_loss
                 batch_acc_loss += acc_loss
                 batch_repeat_loss += repeat_loss
+                batch_null_loss += null_loss
                 current_lr = self.optimizer.param_groups[0]['lr']
+                mini_batch_pbar_postfix["LR"] = f"{current_lr:.6e}"
 
                 if self.rank == 0:
                     self.iteration_losses.append(loss.item())
                     self.lr_during_training.append(current_lr)
                 self.iteration += 1
                 if self.iteration % 10 == 0:
-                    mini_batch_pbar.set_postfix({"Loss": f"{loss.item():.2e}", "Vel Loss": f"{vel_loss.item():.2e}",
-                                                 "Acc Loss": f"{acc_loss.item():.2e}", "Repeat Loss": f"{repeat_loss.item():.2e}", "LR": f"{current_lr:.6e}"})
+                    mini_batch_pbar.set_postfix(mini_batch_pbar_postfix)
 
             if self.rank == 0:
                 avg_loss = batch_loss.item() / (len(self.dataloader) * self.world_size)
                 avg_vel_loss = batch_vel_loss.item() / (len(self.dataloader) * self.world_size)
                 avg_acc_loss = batch_acc_loss.item() / (len(self.dataloader) * self.world_size)
                 avg_repeat_loss = batch_repeat_loss.item() / (len(self.dataloader) * self.world_size)
-                self.epoch_losses.append([avg_loss, avg_vel_loss, avg_acc_loss, avg_repeat_loss])
-                epoch_pbar.set_postfix({"Avg Loss": f"{avg_loss:.2e}", "Avg Vel Loss": f"{avg_vel_loss:.2e}",
-                                        "Avg Acc Loss": f"{avg_acc_loss:.2e}", "Avg Repeat Loss": f"{avg_repeat_loss:.2e}", "LR": f"{current_lr:.6e}"})
+                avg_null_loss = batch_null_loss.item() / (len(self.dataloader) * self.world_size)
+                self.epoch_losses.append([avg_loss, avg_vel_loss, avg_acc_loss, avg_repeat_loss, avg_null_loss])
+                epoch_pbar_postfix = {"Avg Loss": f"{avg_loss:.2e}"}
+                if self.use_vel_loss:
+                    epoch_pbar_postfix["Avg Vel Loss"] = f"{avg_vel_loss:.2e}"
+                    epoch_pbar_postfix["Avg Acc Loss"] = f"{avg_acc_loss:.2e}"
+                if self.use_repeat_token:
+                    epoch_pbar_postfix["Avg Repeat Loss"] = f"{avg_repeat_loss:.2e}"
+                if self.use_mean_exp:
+                    epoch_pbar_postfix["Avg Null Loss"] = f"{avg_null_loss:.2e}"
+                epoch_pbar_postfix["LR"] = f"{current_lr:.6e}"
+                epoch_pbar.set_postfix(epoch_pbar_postfix)
 
             if (epoch + 1) % self.config["save_interval"] == 0 and self.rank == 0:
-                val_loss, val_feature_loss = self.validate()
-                self.val_loss.append(val_loss)
-                self.val_feature_loss.append([f'{i:.5e}' for i in np.mean(val_feature_loss, axis=0)])
+                pass
+                # val_loss, val_feature_loss = self.validate()
+                # self.val_loss.append(val_loss)
+                # self.val_feature_loss.append([f'{i:.5e}' for i in np.mean(val_feature_loss, axis=0)])
             if (epoch + 1) % self.config["save_interval"] == 0 and self.rank == 0:
                 self.plot_and_save_loss()
             if (epoch + 1) % (self.config["save_interval"] * 5) == 0 and self.rank == 0:
@@ -234,6 +251,7 @@ class TrainingManager:
         a = batch['audio_latent'].to(self.device)
         s = batch['shape_latent'].to(self.device)
         m = batch['mouth_latent'].to(self.device)
+        mean_exp = batch['mean_exp'].to(self.device)
         end_indices = batch['end_indices'].to(self.device)
         # batch_size = x.shape[0]
 
@@ -258,8 +276,12 @@ class TrainingManager:
             # by default not use indicator
             noise, x_pred, prev_motion_coef, prev_audio_feat = \
                 self.model(motion_feat = x_gen_gt_repeated, audio_or_feat = a_gen,
-                           shape_feat=x_shape, style_feat=None, mouth_open_ratio = m,
+                           shape_feat=x_shape, style_feat=None, mouth_open_ratio = m, mean_exp = mean_exp,
                            prev_motion_feat = x_prev_gt, prev_audio_feat = a_prev)
+            if self.use_mean_exp:
+                x_pred_ = x_pred[:x_pred.shape[0] // 2]
+                x_null_out = x_pred[x_pred.shape[0] // 2:]
+                x_pred = x_pred_
             if self.use_repeat_token:
                 x_repeat_pred = x_pred[:, self.prev_seq_length: self.prev_seq_length + self.repeat_len]
                 repeat_loss = F.mse_loss(x_repeat_pred, x_repeat_gt)
@@ -277,6 +299,10 @@ class TrainingManager:
 
             loss = F.mse_loss(x_pred_weighted, x_gt_weighted)
             losses.append(loss.detach())
+            vel_loss = torch.zeros(1).to(self.device)
+            acc_loss = torch.zeros(1).to(self.device)
+            repeat_loss = torch.zeros(1).to(self.device)
+            null_loss = torch.zeros(1).to(self.device)
             if self.use_vel_loss:
                 # vel_gt = x[1:] - x[:-1]
                 # vel_pred = x_pred[1:] - x_pred[:-1]
@@ -289,11 +315,17 @@ class TrainingManager:
                 vel_loss = F.mse_loss(temporal_x_pred_vel, temporal_x_vel)
                 acc_loss = F.mse_loss(temporal_x_pred_vel[:, 1:], temporal_x_pred_vel[:, :-1])
                 loss += self.vel_loss_weight * vel_loss + self.acc_loss_weight * acc_loss
-                losses.append(vel_loss.detach())
-                losses.append(acc_loss.detach())
             if self.use_repeat_token:
                 loss += repeat_loss * self.repeat_loss_weight
-                losses.append(repeat_loss.detach())
+            if self.use_mean_exp:
+                x_null_mean = x_null_out.mean(dim=1)
+                null_loss = F.mse_loss(x_null_mean, mean_exp)
+                loss += null_loss * self.null_loss_weight
+
+            losses.append(vel_loss.detach())
+            losses.append(acc_loss.detach())
+            losses.append(repeat_loss.detach())
+            losses.append(null_loss.detach())
 
             loss.backward()
             self.optimizer.step()
@@ -334,19 +366,19 @@ class TrainingManager:
                 if i == len(marks) - 1:  # For the smallest mark, use log scale
                     axes[i, 0].set_yscale('log')
 
-            # Validation losses
-            filtered_val_losses = [(j, loss) for j, loss in enumerate(val_loss_to_plot) if loss <= mark]
+            # # Validation losses
+            # filtered_val_losses = [(j, loss) for j, loss in enumerate(val_loss_to_plot) if loss <= mark]
 
-            if filtered_val_losses:
-                val_iterations, val_losses = zip(*filtered_val_losses)
-                axes[i, 1].plot(val_iterations, val_losses)
-                axes[i, 1].set_title(f"Validation Loss (up to {mark:.0e})")
-                axes[i, 1].set_xlabel("Validation Iteration")
-                axes[i, 1].set_ylabel("Loss")
-                axes[i, 1].set_ylim(0, mark)
+            # if filtered_val_losses:
+            #     val_iterations, val_losses = zip(*filtered_val_losses)
+            #     axes[i, 1].plot(val_iterations, val_losses)
+            #     axes[i, 1].set_title(f"Validation Loss (up to {mark:.0e})")
+            #     axes[i, 1].set_xlabel("Validation Iteration")
+            #     axes[i, 1].set_ylabel("Loss")
+            #     axes[i, 1].set_ylim(0, mark)
 
-                if i == len(marks) - 1:  # For the smallest mark, use log scale
-                    axes[i, 1].set_yscale('log')
+            #     if i == len(marks) - 1:  # For the smallest mark, use log scale
+            #         axes[i, 1].set_yscale('log')
 
         plt.tight_layout()
         plt.savefig(os.path.join(self.output_dir, "loss_plot.png"))
@@ -363,10 +395,10 @@ class TrainingManager:
                 f.write(f"{loss}\n")
             self.iteration_losses = []
 
-        with open(os.path.join(self.output_dir, "validation_feature_losses.txt"), "a") as f:
-            for loss in self.val_feature_loss:
-                f.write(f"{loss}\n")
-            self.val_feature_loss = []
+        # with open(os.path.join(self.output_dir, "validation_feature_losses.txt"), "a") as f:
+        #     for loss in self.val_feature_loss:
+        #         f.write(f"{loss}\n")
+        #     self.val_feature_loss = []
 
         if self.rank == 0:
             print("Loss plot and data saved")
@@ -422,26 +454,10 @@ class TrainingManager:
                             shape_feat=x_shape, style_feat=None, mouth_open_ratio = m,
                             prev_motion_feat = x_prev_gt, prev_audio_feat = a_prev)
                         if self.use_repeat_token:
-                            # x_repeat_pred = x_pred[:, self.prev_seq_length: self.prev_seq_length + self.repeat_len]
-                            # repeat_loss = F.mse_loss(x_repeat_pred, x_repeat_gt)
-                            # carve out the repeated part, x_pred_len is L_p + repeat_len + L
                             x_pred = torch.cat([x_pred[:, :self.prev_seq_length], x_pred[:, self.prev_seq_length + self.repeat_len:]], dim=1)
 
                         mse_loss = F.mse_loss(x_pred, x)
                         l1_abs_loss = torch.abs(x_pred - x)
-
-                    # elif self.model_type == "vanilla":
-                    #     x_input = torch.zeros_like(x_gt)
-                    #     x_pred = self.model.module.inference(x_input, x_prev, a_train, a_prev, x_shape)
-
-                    #     # Calculate loss for each feature dimension
-                    #     mse_loss = F.mse_loss(x_pred, x_gt)
-                    #     l1_abs_loss = torch.abs(x_pred - x_gt)
-
-                    # elif self.model_type == "faceformer":
-                    #     x_pred = self.model(x_gt, x_prev, a_train, a_prev, x_shape)
-                    #     mse_loss = F.mse_loss(x_pred, x[:, :-1, :])
-                    #     l1_abs_loss = torch.abs(x_pred - x_gt)
 
                     l1_abs_loss = l1_abs_loss.reshape(l1_abs_loss.shape[0] * l1_abs_loss.shape[1], -1) # (batch_size * seq_len, kp * 3)
                     x_gt_reshaped = x.reshape(x.shape[0] * x.shape[1], -1) # (batch_size * seq_len, kp * 3)
@@ -633,7 +649,7 @@ if __name__ == "__main__":
         },
         4200: {
             "save_interval": 1,
-            "lr_min_scale": 0.2,
+            "lr_min_scale": 0.5,
             "warmup_iters": 10000,
             "lr_max_iters": 1000000,
             "learning_rate": 5e-5,
@@ -717,12 +733,14 @@ if __name__ == "__main__":
         # condition parameter
         "use_shape_feat": True, # whether to use condition
         "use_mouth_open_ratio": True, # condition type, concat or add
-        "use_vel_loss": True,
+        "use_vel_loss": False,
         "vel_loss_weight": 0,
-        "acc_loss_weight": 0.05,
+        "acc_loss_weight": 0.,
         "use_repeat_token": False,
         "repeat_loss_weight": 0.,
         "repeat_len": 1,
+        "use_mean_exp": True,
+        "null_loss_weight": 1,
         # dataset parameters
         "dataset": args.dataset,
         "motion_latent_type": "exp",  # Motion latent type. Accept ["exp", "x_d"]
@@ -745,7 +763,7 @@ if __name__ == "__main__":
     }
 
     # Load data once in the main process
-    train_data = [torch.Tensor([]) for _ in range(5)]   # motion, audio, shape, mouth, end_indices
+    train_data = [torch.Tensor([]) for _ in range(6)]   # motion, audio, shape, mouth, end_indices
     val_data = []  # motion, audio, shape, mouth, end_indices
     # train_audio_latents, train_motion_latents, train_shape_latents, train_mouth_latents, train_flag_latents, \
     #     val_audio_latents, val_motion_latents, val_shape_latents, val_mouth_latents, val_flag_latents = \

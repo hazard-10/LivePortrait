@@ -78,7 +78,10 @@ def load_and_process_pair(audio_file, motion_file, latent_type='exp', latent_mas
 
     motion_tensor, audio_tensor, shape_tensor, mouth_tensor = process_motion_tensor(motion_tensor, audio_tensor, latent_type, latent_mask_1, latent_bound)
 
-    return motion_tensor, audio_tensor, shape_tensor, mouth_tensor, end_indices
+    mean_exp = torch.mean(motion_tensor.reshape(-1, motion_tensor.shape[-1]), dim=0)
+    mean_exp = mean_exp.expand(motion_tensor.shape[0], -1)
+
+    return motion_tensor, audio_tensor, shape_tensor, mouth_tensor, mean_exp, end_indices
 
 def process_directory(uid, audio_root, motion_root, latent_type='exp', latent_mask_1=None, latent_bound=None):
     audio_dir = os.path.join(audio_root, uid)
@@ -95,6 +98,7 @@ def process_directory(uid, audio_root, motion_root, latent_type='exp', latent_ma
     audio_tensor_list = []
     shape_tensor_list = []
     mouth_tensor_list = []
+    mean_exp_list = []
     end_indices_list = []
     for audio_file, motion_file in zip(audio_files, motion_files):
         if audio_file != motion_file and audio_file.split('+')[0] != motion_file.split('+')[0]:
@@ -104,15 +108,16 @@ def process_directory(uid, audio_root, motion_root, latent_type='exp', latent_ma
         audio_path = os.path.join(audio_dir, audio_file)
         motion_path = os.path.join(motion_dir, motion_file)
 
-        motion_tensor, audio_tensor, shape_tensor, mouth_tensor, end_indices = load_and_process_pair(audio_path, motion_path, latent_type, latent_mask_1, latent_bound)
+        motion_tensor, audio_tensor, shape_tensor, mouth_tensor, mean_exp, end_indices = load_and_process_pair(audio_path, motion_path, latent_type, latent_mask_1, latent_bound)
         motion_tensor_list.append(motion_tensor)
         audio_tensor_list.append(audio_tensor)
         shape_tensor_list.append(shape_tensor)
         mouth_tensor_list.append(mouth_tensor)
+        mean_exp_list.append(mean_exp)
         end_indices_list.append(end_indices)
 
     return torch.cat(motion_tensor_list, dim=0), torch.cat(audio_tensor_list, dim=0), torch.cat(shape_tensor_list, dim=0), \
-            torch.cat(mouth_tensor_list, dim=0), torch.cat(end_indices_list, dim=0)
+            torch.cat(mouth_tensor_list, dim=0), torch.cat(mean_exp_list, dim=0), torch.cat(end_indices_list, dim=0)
 
 def load_npy_files(audio_root, motion_root, start_idx=None, end_idx=None, latent_type='exp', latent_mask_1=None, latent_bound=None):
     all_dir_list = sorted(os.listdir(audio_root))
@@ -125,6 +130,7 @@ def load_npy_files(audio_root, motion_root, start_idx=None, end_idx=None, latent
     all_audio_data = []
     all_shape_data = []
     all_mouth_data = []
+    all_mean_exp = []
     all_end_indices = []
     with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
         future_to_uid = {executor.submit(process_directory, uid, audio_root, motion_root, latent_type, latent_mask_1, latent_bound): uid for uid in dir_list}
@@ -132,12 +138,13 @@ def load_npy_files(audio_root, motion_root, start_idx=None, end_idx=None, latent
         for future in tqdm(as_completed(future_to_uid), total=len(dir_list), desc="Processing directories"):
             uid = future_to_uid[future]
             try:
-                motion_data, audio_data, shape_data, mouth_data, end_indices = future.result()
+                motion_data, audio_data, shape_data, mouth_data, mean_exp, end_indices = future.result()
                 if audio_data is not None and motion_data is not None:
                     all_motion_data.append(motion_data)
                     all_audio_data.append(audio_data)
                     all_shape_data.append(shape_data)
                     all_mouth_data.append(mouth_data)
+                    all_mean_exp.append(mean_exp)
                     all_end_indices.append(end_indices)
             except Exception as exc:
                 print(f'{uid} generated an exception: {exc}')
@@ -146,12 +153,13 @@ def load_npy_files(audio_root, motion_root, start_idx=None, end_idx=None, latent
     audio_tensor = torch.concat(all_audio_data, dim=0)
     shape_tensor = torch.concat(all_shape_data, dim=0)
     mouth_tensor = torch.concat(all_mouth_data, dim=0)
+    mean_exp = torch.concat(all_mean_exp, dim=0)
     end_indices = torch.concat(all_end_indices, dim=0)
 
     # print(f"audio loaded from disk. tensor shape: {audio_tensor.shape}")
     # print(f"motion loaded from disk. tensor shape: {motion_tensor.shape}")
 
-    return motion_tensor, audio_tensor, shape_tensor, mouth_tensor, end_indices
+    return motion_tensor, audio_tensor, shape_tensor, mouth_tensor, mean_exp, end_indices
 
 '''
 Part 2: Frontalize the motion data, swtich euler angles to quaternions
@@ -311,7 +319,8 @@ def process_motion_tensor(motion_tensor, audio_tensor, latent_type='exp', latent
                     motion_tensor = torch.cat([motion_tensor, exp[:, :, d:d+1]], dim=2)
             motion_tensor = motion_tensor.reshape(n_batches, seq_len, -1)
         # compute canonical shape kp, using the average of first 5 frames
-        first_frame_kp = torch.mean(kp[:, :5, :], dim=1)
+        first_frame_kp = torch.mean(kp.reshape(-1, kp.shape[-1]), dim=0)
+        first_frame_kp = first_frame_kp.expand(n_batches, -1)
 
         # Compute the median of mouth_open_ratio
         median_mouth_open_ratio = torch.median(mouth_open_ratio)
@@ -351,15 +360,17 @@ Part 3: Create a custom dataset class for random sampling
 '''
 class MotionAudioDataset(torch.utils.data.Dataset):
     def __init__(self, data):
-        motion_latents, audio_latents, shape_latents, mouth_latents, end_indices = data
+        motion_latents, audio_latents, shape_latents, mouth_latents, mean_exp, end_indices = data
         assert len(motion_latents) == len(audio_latents), "Motion and audio latents must have the same length"
         assert len(motion_latents) == len(shape_latents), "Motion and shape latents must have the same length"
         assert len(motion_latents) == len(mouth_latents), "Motion and mouth latents must have the same length"
+        assert len(motion_latents) == len(mean_exp), "Motion and mean exp must have the same length"
         assert len(motion_latents) == len(end_indices), "Motion and end indices must have the same length"
         self.motion_latents = motion_latents
         self.audio_latents = audio_latents
         self.shape_latents = shape_latents
         self.mouth_latents = mouth_latents
+        self.mean_exp = mean_exp
         self.end_indices = end_indices
 
     def __len__(self):
@@ -371,5 +382,6 @@ class MotionAudioDataset(torch.utils.data.Dataset):
             "audio_latent": self.audio_latents[idx],
             "shape_latent": self.shape_latents[idx],
             "mouth_latent": self.mouth_latents[idx],
+            "mean_exp": self.mean_exp[idx],
             "end_indices": self.end_indices[idx]
         }

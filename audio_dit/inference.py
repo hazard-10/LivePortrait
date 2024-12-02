@@ -45,6 +45,7 @@ class InferenceManager:
                 use_shape_feat=self.config["use_shape_feat"],
                 use_mouth_open_ratio=self.config["use_mouth_open_ratio"] if "use_mouth_open_ratio" in self.config else True,
                 use_repeat_token=self.config["use_repeat_token"] if "use_repeat_token" in self.config else False,
+                use_mean_exp=self.config["use_mean_exp"] if "use_mean_exp" in self.config else False,
                 repeat_len=self.config["repeat_len"] if "repeat_len" in self.config else 1,
                 device=self.device
             ).to(self.device)
@@ -79,7 +80,8 @@ class InferenceManager:
         print(f"Model checkpoint loaded from {checkpoint_path}")
 
     @torch.no_grad()
-    def inference(self, audio_latent, shape_tensor, prev_motion_feat=None, prev_audio_feat=None, cfg_scale=1.0, mouth_open_ratio=None, denoising_steps=None, gen_length=None):
+    def inference(self, audio_latent, shape_tensor, prev_motion_feat=None, prev_audio_feat=None,
+                  cfg_scale=1.0, mouth_open_ratio=None, denoising_steps=None, gen_length=None, mean_exp=None):
         """
         Perform inference on a batch of input audio and shape tensors.
 
@@ -112,7 +114,8 @@ class InferenceManager:
                 prev_audio_feat=prev_audio_feat,
                 cfg_scale=cfg_scale,
                 total_denoising_steps=denoising_steps,
-                gen_length=gen_length
+                gen_length=gen_length,
+                mean_exp=mean_exp
             )
         elif self.model_type == 'vanilla':
             x_input = torch.zeros(shape_tensor.shape[0], audio_latent.shape[1], prev_motion_feat.shape[-1]).to(self.device)
