@@ -34,4 +34,5 @@ output_video_with_audio.mp4
 output_video_without_audio.mp4
 # audio_dit/
 vid_output/
+sync_output/*
 *.mp4
