@@ -75,6 +75,8 @@ class TrainingManager:
         self.repeat_len = self.config["repeat_len"]
         self.use_mean_exp = self.config["use_mean_exp"]
         self.null_loss_weight = torch.tensor(self.config["null_loss_weight"]).to(self.device)
+        self.use_headpose = self.config["use_headpose"]
+        self.headpose_loss_weight = torch.tensor(self.config["headpose_loss_weight"]).to(self.device)
 
         if self.rank == 0 and not self.config["validate_only"]:
             os.makedirs(self.output_dir, exist_ok=True)
@@ -180,6 +182,7 @@ class TrainingManager:
             batch_acc_loss = torch.zeros(1).to(self.device)
             batch_repeat_loss = torch.zeros(1).to(self.device)
             batch_null_loss = torch.zeros(1).to(self.device)
+            batch_pose_loss = torch.zeros(1).to(self.device)
             mini_batch_pbar = tqdm(self.dataloader, desc=f"Epoch {epoch+1}", leave=False, disable=self.rank != 0)
             # mini_batch_pbar = self.dataloader
             for mini_batch in mini_batch_pbar:
@@ -189,6 +192,7 @@ class TrainingManager:
                 acc_loss = losses[2]
                 repeat_loss = losses[3]
                 null_loss = losses[4]
+                pose_loss = losses[5]
                 mini_batch_pbar_postfix = {"Loss": f"{loss.item():.2e}"}
                 if self.use_vel_loss:
                     mini_batch_pbar_postfix["Vel Loss"] = f"{vel_loss.item():.2e}"
@@ -197,6 +201,8 @@ class TrainingManager:
                     mini_batch_pbar_postfix["Repeat Loss"] = f"{repeat_loss.item():.2e}"
                 if self.use_mean_exp:
                     mini_batch_pbar_postfix["Null Loss"] = f"{null_loss.item():.2e}"
+                if self.use_headpose:
+                    mini_batch_pbar_postfix["Pose Loss"] = f"{pose_loss.item():.2e}"
                 # Sum the total loss across all processes
                 reduce(loss, dst=0, op=torch.distributed.ReduceOp.SUM)
                 loss /= self.world_size
@@ -205,6 +211,7 @@ class TrainingManager:
                 batch_acc_loss += acc_loss
                 batch_repeat_loss += repeat_loss
                 batch_null_loss += null_loss
+                batch_pose_loss += pose_loss
                 current_lr = self.optimizer.param_groups[0]['lr']
                 mini_batch_pbar_postfix["LR"] = f"{current_lr:.6e}"
 
@@ -221,7 +228,8 @@ class TrainingManager:
                 avg_acc_loss = batch_acc_loss.item() / (len(self.dataloader) * self.world_size)
                 avg_repeat_loss = batch_repeat_loss.item() / (len(self.dataloader) * self.world_size)
                 avg_null_loss = batch_null_loss.item() / (len(self.dataloader) * self.world_size)
-                self.epoch_losses.append([avg_loss, avg_vel_loss, avg_acc_loss, avg_repeat_loss, avg_null_loss])
+                avg_pose_loss = batch_pose_loss.item() / (len(self.dataloader) * self.world_size)
+                self.epoch_losses.append([avg_loss, avg_vel_loss, avg_acc_loss, avg_repeat_loss, avg_null_loss, avg_pose_loss])
                 epoch_pbar_postfix = {"Avg Loss": f"{avg_loss:.2e}"}
                 if self.use_vel_loss:
                     epoch_pbar_postfix["Avg Vel Loss"] = f"{avg_vel_loss:.2e}"
@@ -230,6 +238,8 @@ class TrainingManager:
                     epoch_pbar_postfix["Avg Repeat Loss"] = f"{avg_repeat_loss:.2e}"
                 if self.use_mean_exp:
                     epoch_pbar_postfix["Avg Null Loss"] = f"{avg_null_loss:.2e}"
+                if self.use_headpose:
+                    epoch_pbar_postfix["Avg Pose Loss"] = f"{avg_pose_loss:.2e}"
                 epoch_pbar_postfix["LR"] = f"{current_lr:.6e}"
                 epoch_pbar.set_postfix(epoch_pbar_postfix)
 
@@ -287,9 +297,15 @@ class TrainingManager:
                 repeat_loss = F.mse_loss(x_repeat_pred, x_repeat_gt)
                 # carve out the repeated part, x_pred_len is L_p + repeat_len + L
                 x_pred = torch.cat([x_pred[:, :self.prev_seq_length], x_pred[:, self.prev_seq_length + self.repeat_len:]], dim=1)
+            if self.use_headpose:
+                x_pred_ = x_pred[:, :, :self.loss_weight.shape[0]]
+                x_pose_pred = x_pred[:, :, self.loss_weight.shape[0]:]
+                x_pose_gt = x[:, :, self.loss_weight.shape[0]:]
+                x_pred = x_pred_
 
+            x_gt = x[:, :, :self.loss_weight.shape[0]]
             x_pred_weighted = self.loss_weight * x_pred
-            x_gt_weighted = self.loss_weight * x
+            x_gt_weighted = self.loss_weight * x_gt
 
             batch_size, seq_length, _ = x_gt_weighted.shape
             mask = torch.arange(seq_length, device=self.device).expand(batch_size, seq_length) < end_indices.unsqueeze(1)
@@ -303,6 +319,7 @@ class TrainingManager:
             acc_loss = torch.zeros(1).to(self.device)
             repeat_loss = torch.zeros(1).to(self.device)
             null_loss = torch.zeros(1).to(self.device)
+            pose_loss = torch.zeros(1).to(self.device)
             if self.use_vel_loss:
                 # vel_gt = x[1:] - x[:-1]
                 # vel_pred = x_pred[1:] - x_pred[:-1]
@@ -321,12 +338,17 @@ class TrainingManager:
                 x_null_mean = x_null_out.mean(dim=1)
                 null_loss = F.mse_loss(x_null_mean, mean_exp)
                 loss += null_loss * self.null_loss_weight
-
+            if self.use_headpose:
+                x_pose_pred_weighted = self.headpose_loss_weight * x_pose_pred
+                x_pose_gt_weighted = self.headpose_loss_weight * x_pose_gt
+                pose_loss = F.mse_loss(x_pose_pred_weighted, x_pose_gt_weighted)
+                loss += pose_loss
             losses.append(vel_loss.detach())
             losses.append(acc_loss.detach())
             losses.append(repeat_loss.detach())
             losses.append(null_loss.detach())
 
+            losses.append(pose_loss.detach())
             loss.backward()
             self.optimizer.step()
             if self.lr_scheduler and self.iteration < self.config["lr_max_iters"] + self.config["warmup_iters"]:
@@ -559,7 +581,7 @@ if __name__ == "__main__":
                         help="Type of model to use: 'dit' or 'vanilla'")
     parser.add_argument("-val", "--validate_only", action="store_true",
                         help="Run validation only, without training") # by default training would include validation
-    on_remote = True
+    on_remote = False
     if not on_remote:
         parser.add_argument("-va", "--vox2_audio_root", type=str, default='/mnt/e/data/live_latent/audio_latent/')
         parser.add_argument("-vm", "--vox2_motion_root", type=str, default='/mnt/e/data/live_latent/motion_temp/')
@@ -707,11 +729,19 @@ if __name__ == "__main__":
     60     -0.0219573974609375,  0.0247344970703125,   -0.039764404296875,    0.045,               -0.01512908935546875,    0.017730712890625,    ]
     '''
 
+    headpose_bound_list = [
+        -21,                   25,                   -30,                   30,                  -23,                     23,
+        -0.3,                  0.3,                  -0.3,                 0.28,                ]
+    headpose_loss_weight = [0.001, 0.001, 0.001, 0.1, 0.1]
+    use_headpose = True
+    use_headpose_vel_loss = True
 
     config = {
         # Model parameters
+        "use_headpose": use_headpose,
         "model_type" : args.model_type,
-        "x_dim": len(latent_mask_1),
+        "x_dim": len(latent_mask_1) + len(headpose_loss_weight) \
+                   if use_headpose else len(latent_mask_1),
         "person_dim": 63,  # Dimension for person latent
         "a_dim": 768,  # Dimension for audio latent
         "hidden_size": 512,  # Hidden size for the transformer
@@ -741,12 +771,15 @@ if __name__ == "__main__":
         "repeat_len": 1,
         "use_mean_exp": True,
         "null_loss_weight": 1,
+        "use_headpose_vel_loss": use_headpose_vel_loss and use_headpose,
         # dataset parameters
         "dataset": args.dataset,
         "motion_latent_type": "exp",  # Motion latent type. Accept ["exp", "x_d"]
         "latent_mask_1": latent_mask_1,
         "latent_bound": latent_bound_list,
         "loss_weight": loss_weight,
+        "headpose_bound": headpose_bound_list,
+        "headpose_loss_weight": headpose_loss_weight,
         # training data parameters
         "vox2_train_start_idx": args.vox2_train_start_idx,  # Starting index for training data
         "vox2_train_end_idx": args.vox2_train_end_idx,  # Ending index for training data
@@ -772,7 +805,8 @@ if __name__ == "__main__":
     if "vox2" in args.dataset:
         vox2_val_data = load_npy_files(args.vox2_audio_root, args.vox2_motion_root,
                                                                          args.vox2_validate_start_idx, args.vox2_validate_end_idx,
-                                                                        config["motion_latent_type"], config["latent_mask_1"], config["latent_bound"])
+                                                                        config["motion_latent_type"], config["latent_mask_1"], config["latent_bound"],
+                                                                        config["use_headpose"], config["headpose_bound"])
         val_data.append(vox2_val_data)
         print(f"Vox2 validation Data loaded. audio shape: {val_data[-1][0].shape}, \
                 motion shape: {val_data[-1][1].shape}, shape shape: {val_data[-1][2].shape}, mouth shape: {val_data[-1][3].shape}, end_indices shape: {val_data[-1][4].shape}")
@@ -780,7 +814,8 @@ if __name__ == "__main__":
             # Normal Training mode
             vox2_train_data = load_npy_files(args.vox2_audio_root, args.vox2_motion_root,
                                              args.vox2_train_start_idx, args.vox2_train_end_idx,
-                                             config["motion_latent_type"], config["latent_mask_1"], config["latent_bound"])
+                                             config["motion_latent_type"], config["latent_mask_1"], config["latent_bound"],
+                                             config["use_headpose"], config["headpose_bound"])
             for i, d in enumerate(vox2_train_data):
                 train_data[i] = torch.cat([train_data[i], d], dim=0)
             print(f"Vox2 training Data loaded. audio shape: {train_data[0].shape}, motion shape: {train_data[1].shape}, \
@@ -792,13 +827,15 @@ if __name__ == "__main__":
         test_audio_root = args.hdtf_test_root + "audio_latent/"
         test_motion_root = args.hdtf_test_root + "live_latent/"
         hdtf_val_data = load_npy_files(test_audio_root, test_motion_root, 0, 8,
-                                        config["motion_latent_type"], config["latent_mask_1"], config["latent_bound"]) # load all validation data
+                                        config["motion_latent_type"], config["latent_mask_1"], config["latent_bound"],
+                                        config["use_headpose"], config["headpose_bound"]) # load all validation data
         val_data.append(hdtf_val_data)
         print(f"HDTF validation Data loaded. audio shape: {val_data[-1][0].shape}, motion shape: {val_data[-1][1].shape}, shape shape: {val_data[-1][2].shape}, mouth shape: {val_data[-1][3].shape}, end_indices shape: {val_data[-1][4].shape}")
         if not config["validate_only"]:
             hdtf_train_data = load_npy_files(train_audio_root, train_motion_root,
                                              args.hdtf_train_start_idx, args.hdtf_train_end_idx,
-                                             config["motion_latent_type"], config["latent_mask_1"], config["latent_bound"])
+                                             config["motion_latent_type"], config["latent_mask_1"], config["latent_bound"],
+                                             config["use_headpose"], config["headpose_bound"])
             print(f"HDTF training Data loaded. audio shape: {hdtf_train_data[0].shape}, motion shape: {hdtf_train_data[1].shape}, \
                                                 shape shape: {hdtf_train_data[2].shape}, mouth shape: {hdtf_train_data[3].shape}, end_indices shape: {hdtf_train_data[4].shape}")
             for i, d in enumerate(hdtf_train_data):

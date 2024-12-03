@@ -600,7 +600,7 @@ class DenoisingNetwork(nn.Module):
         return next(self.parameters()).device
 
     def forward(self, motion_feat, audio_feat, prev_motion_feat, prev_audio_feat, step,
-                indicator=None, shape_feat=None, mouth_open_ratio=None, mean_exp=None, is_inference=True):
+                indicator=None, shape_feat=None, mouth_open_ratio=None, mean_exp=None):
         """
         Args:
             motion_feat: (N, L, d_motion). Noisy motion feature
@@ -616,8 +616,10 @@ class DenoisingNetwork(nn.Module):
         """
         # Diffusion time step embedding
         diff_step_embedding = self.diff_step_map(self.TE.pe[0, step]).unsqueeze(1)  # (N, 1, diff_step_dim)
-        if not is_inference:
-            cond_feat = diff_step_embedding if not self.use_mean_exp else torch.cat([diff_step_embedding, diff_step_embedding], dim=0)
+        need_expand = diff_step_embedding.shape[0] != motion_feat.shape[0] and \
+                    diff_step_embedding.shape[0] * 2 == motion_feat.shape[0]
+        if need_expand:
+            cond_feat = torch.cat([diff_step_embedding, diff_step_embedding], dim=0)
         else:
             cond_feat = diff_step_embedding
         if self.use_shape_feat:
