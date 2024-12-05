@@ -296,8 +296,13 @@ def process_motion_tensor(motion_tensor, audio_tensor,
         for pose_index in range(headpose_bound.shape[0]):
             lower_bound = headpose_bound[pose_index][0]
             upper_bound = headpose_bound[pose_index][1]
-            adjusted_pose[:, :, pose_index] = torch.clamp(adjusted_pose[:, :, pose_index], min=lower_bound, max=upper_bound)
 
+            # First clamp the values
+            clamped = torch.clamp(adjusted_pose[:, :, pose_index], min=lower_bound, max=upper_bound)
+            # Then normalize to [-0.05, 0.05] range
+            normalized = (clamped - lower_bound) / (upper_bound - lower_bound) * 0.1 - 0.05
+            # Update the pose with normalized values
+            adjusted_pose[:, :, pose_index] = normalized
 
     if latent_type == 'exp':
         '''

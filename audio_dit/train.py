@@ -66,7 +66,7 @@ class TrainingManager:
         self.prev_seq_length = 10
         self.data_regulator = None
 
-        self.loss_weight = torch.tensor(self.config["loss_weight"]).to(self.device)
+        self.loss_weight = torch.tensor(self.config["loss_weight"]).to(self.device) * (1 - self.config["zero_exp_loss_weight"])
         self.use_vel_loss = self.config["use_vel_loss"]
         self.vel_loss_weight = torch.tensor(self.config["vel_loss_weight"]).to(self.device)
         self.acc_loss_weight = torch.tensor(self.config["acc_loss_weight"]).to(self.device)
@@ -77,6 +77,8 @@ class TrainingManager:
         self.null_loss_weight = torch.tensor(self.config["null_loss_weight"]).to(self.device)
         self.use_headpose = self.config["use_headpose"]
         self.headpose_loss_weight = torch.tensor(self.config["headpose_loss_weight"]).to(self.device)
+        self.use_headpose_vel_loss = self.config["use_headpose_vel_loss"]
+        self.headpose_vel_loss_weight = torch.tensor(self.config["headpose_vel_loss_weight"]).to(self.device)
 
         if self.rank == 0 and not self.config["validate_only"]:
             os.makedirs(self.output_dir, exist_ok=True)
@@ -183,6 +185,7 @@ class TrainingManager:
             batch_repeat_loss = torch.zeros(1).to(self.device)
             batch_null_loss = torch.zeros(1).to(self.device)
             batch_pose_loss = torch.zeros(1).to(self.device)
+            batch_headpose_vel_loss = torch.zeros(1).to(self.device)
             mini_batch_pbar = tqdm(self.dataloader, desc=f"Epoch {epoch+1}", leave=False, disable=self.rank != 0)
             # mini_batch_pbar = self.dataloader
             for mini_batch in mini_batch_pbar:
@@ -193,6 +196,7 @@ class TrainingManager:
                 repeat_loss = losses[3]
                 null_loss = losses[4]
                 pose_loss = losses[5]
+                headpose_vel_loss = losses[6]
                 mini_batch_pbar_postfix = {"Loss": f"{loss.item():.2e}"}
                 if self.use_vel_loss:
                     mini_batch_pbar_postfix["Vel Loss"] = f"{vel_loss.item():.2e}"
@@ -203,6 +207,8 @@ class TrainingManager:
                     mini_batch_pbar_postfix["Null Loss"] = f"{null_loss.item():.2e}"
                 if self.use_headpose:
                     mini_batch_pbar_postfix["Pose Loss"] = f"{pose_loss.item():.2e}"
+                if self.use_headpose_vel_loss:
+                    mini_batch_pbar_postfix["Hp Vel Loss"] = f"{headpose_vel_loss.item():.2e}"
                 # Sum the total loss across all processes
                 reduce(loss, dst=0, op=torch.distributed.ReduceOp.SUM)
                 loss /= self.world_size
@@ -212,6 +218,7 @@ class TrainingManager:
                 batch_repeat_loss += repeat_loss
                 batch_null_loss += null_loss
                 batch_pose_loss += pose_loss
+                batch_headpose_vel_loss += headpose_vel_loss
                 current_lr = self.optimizer.param_groups[0]['lr']
                 mini_batch_pbar_postfix["LR"] = f"{current_lr:.6e}"
 
@@ -229,7 +236,8 @@ class TrainingManager:
                 avg_repeat_loss = batch_repeat_loss.item() / (len(self.dataloader) * self.world_size)
                 avg_null_loss = batch_null_loss.item() / (len(self.dataloader) * self.world_size)
                 avg_pose_loss = batch_pose_loss.item() / (len(self.dataloader) * self.world_size)
-                self.epoch_losses.append([avg_loss, avg_vel_loss, avg_acc_loss, avg_repeat_loss, avg_null_loss, avg_pose_loss])
+                avg_headpose_vel_loss = batch_headpose_vel_loss.item() / (len(self.dataloader) * self.world_size)
+                self.epoch_losses.append([avg_loss, avg_vel_loss, avg_acc_loss, avg_repeat_loss, avg_null_loss, avg_pose_loss, avg_headpose_vel_loss])
                 epoch_pbar_postfix = {"Avg Loss": f"{avg_loss:.2e}"}
                 if self.use_vel_loss:
                     epoch_pbar_postfix["Avg Vel Loss"] = f"{avg_vel_loss:.2e}"
@@ -240,6 +248,8 @@ class TrainingManager:
                     epoch_pbar_postfix["Avg Null Loss"] = f"{avg_null_loss:.2e}"
                 if self.use_headpose:
                     epoch_pbar_postfix["Avg Pose Loss"] = f"{avg_pose_loss:.2e}"
+                if self.use_headpose_vel_loss:
+                    epoch_pbar_postfix["Avg Hp Vel Loss"] = f"{avg_headpose_vel_loss:.2e}"
                 epoch_pbar_postfix["LR"] = f"{current_lr:.6e}"
                 epoch_pbar.set_postfix(epoch_pbar_postfix)
 
@@ -320,12 +330,13 @@ class TrainingManager:
             repeat_loss = torch.zeros(1).to(self.device)
             null_loss = torch.zeros(1).to(self.device)
             pose_loss = torch.zeros(1).to(self.device)
+            headpose_vel_loss = torch.zeros(1).to(self.device)
             if self.use_vel_loss:
                 # vel_gt = x[1:] - x[:-1]
                 # vel_pred = x_pred[1:] - x_pred[:-1]
                 # vel_loss = F.mse_loss(vel_pred, vel_gt)
                 # acc_loss = F.mse_loss(vel_pred[1:], vel_pred[:-1])
-                temporal_x = x[:, self.prev_seq_length-2:self.prev_seq_length+1]
+                temporal_x = x_gt[:, self.prev_seq_length-2:self.prev_seq_length+1]
                 temporal_x_pred = x_pred[:, self.prev_seq_length-2:self.prev_seq_length+1]
                 temporal_x_vel = temporal_x[:, 1:] - temporal_x[:, :-1]
                 temporal_x_pred_vel = temporal_x_pred[:, 1:] - temporal_x_pred[:, :-1]
@@ -343,12 +354,18 @@ class TrainingManager:
                 x_pose_gt_weighted = self.headpose_loss_weight * x_pose_gt
                 pose_loss = F.mse_loss(x_pose_pred_weighted, x_pose_gt_weighted)
                 loss += pose_loss
+                if self.use_headpose_vel_loss:
+                    x_pose_gt_vel = (x_pose_gt[:, 1:] - x_pose_gt[:, :-1]) * self.headpose_loss_weight
+                    x_pose_pred_vel = (x_pose_pred[:, 1:] - x_pose_pred[:, :-1]) * self.headpose_loss_weight
+                    headpose_vel_loss = F.mse_loss(x_pose_pred_vel, x_pose_gt_vel)
+                    loss += self.headpose_vel_loss_weight * headpose_vel_loss
             losses.append(vel_loss.detach())
             losses.append(acc_loss.detach())
             losses.append(repeat_loss.detach())
             losses.append(null_loss.detach())
 
             losses.append(pose_loss.detach())
+            losses.append(headpose_vel_loss.detach())
             loss.backward()
             self.optimizer.step()
             if self.lr_scheduler and self.iteration < self.config["lr_max_iters"] + self.config["warmup_iters"]:
@@ -581,7 +598,7 @@ if __name__ == "__main__":
                         help="Type of model to use: 'dit' or 'vanilla'")
     parser.add_argument("-val", "--validate_only", action="store_true",
                         help="Run validation only, without training") # by default training would include validation
-    on_remote = False
+    on_remote = True
     if not on_remote:
         parser.add_argument("-va", "--vox2_audio_root", type=str, default='/mnt/e/data/live_latent/audio_latent/')
         parser.add_argument("-vm", "--vox2_motion_root", type=str, default='/mnt/e/data/live_latent/motion_temp/')
@@ -732,7 +749,7 @@ if __name__ == "__main__":
     headpose_bound_list = [
         -21,                   25,                   -30,                   30,                  -23,                     23,
         -0.3,                  0.3,                  -0.3,                 0.28,                ]
-    headpose_loss_weight = [0.001, 0.001, 0.001, 0.1, 0.1]
+    headpose_loss_weight = [1, 1, 1, 1, 1]
     use_headpose = True
     use_headpose_vel_loss = True
 
@@ -772,6 +789,8 @@ if __name__ == "__main__":
         "use_mean_exp": True,
         "null_loss_weight": 1,
         "use_headpose_vel_loss": use_headpose_vel_loss and use_headpose,
+        "headpose_vel_loss_weight": 0.5,
+        "zero_exp_loss_weight": False,
         # dataset parameters
         "dataset": args.dataset,
         "motion_latent_type": "exp",  # Motion latent type. Accept ["exp", "x_d"]
