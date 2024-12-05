@@ -60,13 +60,25 @@ class TrainingManager:
         self.output_dir = os.path.join(args.output_dir, time.strftime("%m%d-%H-%M-%S"))
         self.checkpoint_dir = args.checkpoint_dir
 
-        self.train_data = train_data # motion_latents, audio_latents, shape_latents, mouth_latents, flag
-        self.val_data = val_data # N datasets of (motion_latents, audio_latents, shape_latents, mouth_latents, flag)
+        self.train_data = train_data # motion_latents, audio_latents, shape_latents, mouth_latents, end_indices
+        self.val_data = val_data # N datasets of (motion_latents, audio_latents, shape_latents, mouth_latents, end_indices)
 
         self.prev_seq_length = 10
         self.data_regulator = None
 
-        self.loss_weight = torch.tensor(self.config["loss_weight"]).to(self.device)
+        self.loss_weight = torch.tensor(self.config["loss_weight"]).to(self.device) * (1 - self.config["zero_exp_loss_weight"])
+        self.use_vel_loss = self.config["use_vel_loss"]
+        self.vel_loss_weight = torch.tensor(self.config["vel_loss_weight"]).to(self.device)
+        self.acc_loss_weight = torch.tensor(self.config["acc_loss_weight"]).to(self.device)
+        self.use_repeat_token = self.config["use_repeat_token"]
+        self.repeat_loss_weight = torch.tensor(self.config["repeat_loss_weight"]).to(self.device)
+        self.repeat_len = self.config["repeat_len"]
+        self.use_mean_exp = self.config["use_mean_exp"]
+        self.null_loss_weight = torch.tensor(self.config["null_loss_weight"]).to(self.device)
+        self.use_headpose = self.config["use_headpose"]
+        self.headpose_loss_weight = torch.tensor(self.config["headpose_loss_weight"]).to(self.device)
+        self.use_headpose_vel_loss = self.config["use_headpose_vel_loss"]
+        self.headpose_vel_loss_weight = torch.tensor(self.config["headpose_vel_loss_weight"]).to(self.device)
 
         if self.rank == 0 and not self.config["validate_only"]:
             os.makedirs(self.output_dir, exist_ok=True)
@@ -88,28 +100,15 @@ class TrainingManager:
                 feature_dim=self.config["hidden_size"],
                 n_heads = self.config["num_attention_heads"],
                 n_layers=self.config["num_layers"],
+                align_mask_width=self.config["align_mask_width"],
                 n_diff_steps = self.config["n_diff_steps"],
                 use_shape_feat=self.config["use_shape_feat"],
                 use_mouth_open_ratio=self.config["use_mouth_open_ratio"],
+                use_repeat_token=self.config["use_repeat_token"],
+                use_mean_exp=self.config["use_mean_exp"],
+                repeat_len=self.config["repeat_len"],
                 device=self.device
             ).to(self.device)
-        elif self.model_type == "vanilla":
-            self.model = VanillaTransformer(
-                x_dim=self.config["x_dim"],
-                a_dim=self.config["a_dim"],
-                hidden_size=self.config["hidden_size"],
-                num_layers=self.config["num_layers"],
-                num_heads=self.config["num_attention_heads"],
-            ).to(self.device)
-        elif self.model_type == "faceformer":
-            self.model = FaceFormer(
-                x_dim=self.config["x_dim"],
-                a_dim=self.config["a_dim"],
-                hidden_size=self.config["hidden_size"],
-                num_layers=self.config["num_layers"],
-                num_heads=self.config["num_attention_heads"],
-            ).to(self.device)
-
         else:
             raise ValueError(f"Unknown model type: {self.model_type}")
 
@@ -151,38 +150,6 @@ class TrainingManager:
         else:
             return None
 
-        # elif self.config["model_type"] == "vanilla":
-        #     if self.config["scheduler"] == "none":
-        #         return None
-        #     elif self.config["scheduler"] == "cosine":
-        #         return torch.optim.lr_scheduler.CosineAnnealingLR(
-        #             self.optimizer,
-        #             T_max=self.config["lr_max_iters"],
-        #             eta_min=self.config["learning_rate"] * self.config["lr_min_scale"]
-        #         )
-        #     elif self.config["scheduler"] == "linear":
-        #         return torch.optim.lr_scheduler.LinearLR(
-        #             self.optimizer,
-        #             start_factor=1.0,
-        #             total_iters=self.config["lr_max_iters"],
-        #             end_factor=self.config["lr_min_scale"],
-        #         )
-        #     else:
-        #         raise ValueError(f"Unknown scheduler type: {self.config['scheduler']}")
-
-    # def normalize_features(self, validate=False):
-    #     # Standardize (mean=0, std=1)
-    #     if self.data_regulator is None:
-    #         motion_mean = torch.mean(self.motion_latents, dim=0, keepdim=True)
-    #         motion_std = torch.std(self.motion_latents, dim=0, keepdim=True)
-    #         self.data_regulator = {"motion_mean": motion_mean, "motion_std": motion_std}
-    #         torch.save(self.data_regulator, os.path.join(self.output_dir, "data_regularization.pt"))
-
-    #     if validate:
-    #         self.val_motion_latents = (self.val_motion_latents - self.data_regulator["motion_mean"]) / (self.data_regulator["motion_std"] + 1e-8)
-    #     else:
-    #         self.motion_latents = (self.motion_latents - self.data_regulator["motion_mean"]) / (self.data_regulator["motion_std"] + 1e-8)
-
 
     def run(self):
         self.model.train()
@@ -213,32 +180,84 @@ class TrainingManager:
         for epoch in epoch_pbar:
             self.dataloader.sampler.set_epoch(epoch)
             batch_loss = torch.zeros(1).to(self.device)
+            batch_vel_loss = torch.zeros(1).to(self.device)
+            batch_acc_loss = torch.zeros(1).to(self.device)
+            batch_repeat_loss = torch.zeros(1).to(self.device)
+            batch_null_loss = torch.zeros(1).to(self.device)
+            batch_pose_loss = torch.zeros(1).to(self.device)
+            batch_headpose_vel_loss = torch.zeros(1).to(self.device)
             mini_batch_pbar = tqdm(self.dataloader, desc=f"Epoch {epoch+1}", leave=False, disable=self.rank != 0)
             # mini_batch_pbar = self.dataloader
             for mini_batch in mini_batch_pbar:
-                loss = self.train_step(mini_batch)
+                losses = self.train_step(mini_batch)
+                loss = losses[0]
+                vel_loss = losses[1]
+                acc_loss = losses[2]
+                repeat_loss = losses[3]
+                null_loss = losses[4]
+                pose_loss = losses[5]
+                headpose_vel_loss = losses[6]
+                mini_batch_pbar_postfix = {"Loss": f"{loss.item():.2e}"}
+                if self.use_vel_loss:
+                    mini_batch_pbar_postfix["Vel Loss"] = f"{vel_loss.item():.2e}"
+                    mini_batch_pbar_postfix["Acc Loss"] = f"{acc_loss.item():.2e}"
+                if self.use_repeat_token:
+                    mini_batch_pbar_postfix["Repeat Loss"] = f"{repeat_loss.item():.2e}"
+                if self.use_mean_exp:
+                    mini_batch_pbar_postfix["Null Loss"] = f"{null_loss.item():.2e}"
+                if self.use_headpose:
+                    mini_batch_pbar_postfix["Pose Loss"] = f"{pose_loss.item():.2e}"
+                if self.use_headpose_vel_loss:
+                    mini_batch_pbar_postfix["Hp Vel Loss"] = f"{headpose_vel_loss.item():.2e}"
                 # Sum the total loss across all processes
                 reduce(loss, dst=0, op=torch.distributed.ReduceOp.SUM)
                 loss /= self.world_size
                 batch_loss += loss
+                batch_vel_loss += vel_loss
+                batch_acc_loss += acc_loss
+                batch_repeat_loss += repeat_loss
+                batch_null_loss += null_loss
+                batch_pose_loss += pose_loss
+                batch_headpose_vel_loss += headpose_vel_loss
                 current_lr = self.optimizer.param_groups[0]['lr']
+                mini_batch_pbar_postfix["LR"] = f"{current_lr:.6e}"
 
                 if self.rank == 0:
                     self.iteration_losses.append(loss.item())
                     self.lr_during_training.append(current_lr)
                 self.iteration += 1
                 if self.iteration % 10 == 0:
-                    mini_batch_pbar.set_postfix({"Loss": f"{loss.item():.2e}", "LR": f"{current_lr:.6e}"})
+                    mini_batch_pbar.set_postfix(mini_batch_pbar_postfix)
 
             if self.rank == 0:
                 avg_loss = batch_loss.item() / (len(self.dataloader) * self.world_size)
-                self.epoch_losses.append(avg_loss)
-                epoch_pbar.set_postfix({"Avg Loss": f"{avg_loss:.2e}", "LR": f"{current_lr:.6e}"})
+                avg_vel_loss = batch_vel_loss.item() / (len(self.dataloader) * self.world_size)
+                avg_acc_loss = batch_acc_loss.item() / (len(self.dataloader) * self.world_size)
+                avg_repeat_loss = batch_repeat_loss.item() / (len(self.dataloader) * self.world_size)
+                avg_null_loss = batch_null_loss.item() / (len(self.dataloader) * self.world_size)
+                avg_pose_loss = batch_pose_loss.item() / (len(self.dataloader) * self.world_size)
+                avg_headpose_vel_loss = batch_headpose_vel_loss.item() / (len(self.dataloader) * self.world_size)
+                self.epoch_losses.append([avg_loss, avg_vel_loss, avg_acc_loss, avg_repeat_loss, avg_null_loss, avg_pose_loss, avg_headpose_vel_loss])
+                epoch_pbar_postfix = {"Avg Loss": f"{avg_loss:.2e}"}
+                if self.use_vel_loss:
+                    epoch_pbar_postfix["Avg Vel Loss"] = f"{avg_vel_loss:.2e}"
+                    epoch_pbar_postfix["Avg Acc Loss"] = f"{avg_acc_loss:.2e}"
+                if self.use_repeat_token:
+                    epoch_pbar_postfix["Avg Repeat Loss"] = f"{avg_repeat_loss:.2e}"
+                if self.use_mean_exp:
+                    epoch_pbar_postfix["Avg Null Loss"] = f"{avg_null_loss:.2e}"
+                if self.use_headpose:
+                    epoch_pbar_postfix["Avg Pose Loss"] = f"{avg_pose_loss:.2e}"
+                if self.use_headpose_vel_loss:
+                    epoch_pbar_postfix["Avg Hp Vel Loss"] = f"{avg_headpose_vel_loss:.2e}"
+                epoch_pbar_postfix["LR"] = f"{current_lr:.6e}"
+                epoch_pbar.set_postfix(epoch_pbar_postfix)
 
             if (epoch + 1) % self.config["save_interval"] == 0 and self.rank == 0:
-                val_loss, val_feature_loss = self.validate()
-                self.val_loss.append(val_loss)
-                self.val_feature_loss.append([f'{i:.5e}' for i in np.mean(val_feature_loss, axis=0)])
+                pass
+                # val_loss, val_feature_loss = self.validate()
+                # self.val_loss.append(val_loss)
+                # self.val_feature_loss.append([f'{i:.5e}' for i in np.mean(val_feature_loss, axis=0)])
             if (epoch + 1) % self.config["save_interval"] == 0 and self.rank == 0:
                 self.plot_and_save_loss()
             if (epoch + 1) % (self.config["save_interval"] * 5) == 0 and self.rank == 0:
@@ -252,11 +271,21 @@ class TrainingManager:
         a = batch['audio_latent'].to(self.device)
         s = batch['shape_latent'].to(self.device)
         m = batch['mouth_latent'].to(self.device)
+        mean_exp = batch['mean_exp'].to(self.device)
+        end_indices = batch['end_indices'].to(self.device)
         # batch_size = x.shape[0]
 
-        x_prev, x_gt = x[:, :self.prev_seq_length], x[:, self.prev_seq_length:]
-        a_prev, a_train = a[:, :self.prev_seq_length], a[:, self.prev_seq_length:]
+        x_prev_gt, x_gen_gt = x[:, :self.prev_seq_length], x[:, self.prev_seq_length:]
+        a_prev, a_gen = a[:, :self.prev_seq_length], a[:, self.prev_seq_length:]
         x_shape = s
+
+        if self.use_repeat_token:
+            x_repeat_gt = x_prev_gt[:, -self.repeat_len:] # repeat last few frames of previous motion
+            x_gen_gt_repeated = torch.cat([x_repeat_gt, x_gen_gt], dim=1)
+            # only repeat motion, audio will have according special token written in dit_model.py
+        else:
+            x_gen_gt_repeated = x_gen_gt
+        losses = []
         # t1 = time.time()
         # Convert inputs to BF16
         # x_gt = x_gt.bfloat16()
@@ -265,52 +294,87 @@ class TrainingManager:
         # a_prev = a_prev.bfloat16()
         if self.model_type == "dit":
             # by default not use indicator
+            noise, x_pred, prev_motion_coef, prev_audio_feat = \
+                self.model(motion_feat = x_gen_gt_repeated, audio_or_feat = a_gen,
+                           shape_feat=x_shape, style_feat=None, mouth_open_ratio = m, mean_exp = mean_exp,
+                           prev_motion_feat = x_prev_gt, prev_audio_feat = a_prev)
+            if self.use_mean_exp:
+                x_pred_ = x_pred[:x_pred.shape[0] // 2]
+                x_null_out = x_pred[x_pred.shape[0] // 2:]
+                x_pred = x_pred_
+            if self.use_repeat_token:
+                x_repeat_pred = x_pred[:, self.prev_seq_length: self.prev_seq_length + self.repeat_len]
+                repeat_loss = F.mse_loss(x_repeat_pred, x_repeat_gt)
+                # carve out the repeated part, x_pred_len is L_p + repeat_len + L
+                x_pred = torch.cat([x_pred[:, :self.prev_seq_length], x_pred[:, self.prev_seq_length + self.repeat_len:]], dim=1)
+            if self.use_headpose:
+                x_pred_ = x_pred[:, :, :self.loss_weight.shape[0]]
+                x_pose_pred = x_pred[:, :, self.loss_weight.shape[0]:]
+                x_pose_gt = x[:, :, self.loss_weight.shape[0]:]
+                x_pred = x_pred_
 
-            noise, x_out, prev_motion_coef, prev_audio_feat = \
-                self.model(motion_feat = x_gt, audio_or_feat = a_train,
-                           shape_feat=x_shape, style_feat=None, mouth_open_ratio = m,
-                           prev_motion_feat = x_prev, prev_audio_feat = a_prev)
-            x_pred = x_out
+            x_gt = x[:, :, :self.loss_weight.shape[0]]
+            x_pred_weighted = self.loss_weight * x_pred
+            x_gt_weighted = self.loss_weight * x_gt
 
-            # non_zero_mask = (x_gt != 0)
-            # squared_diff = (x_pred - x_gt) ** 2
-            # masked_squared_diff = squared_diff * non_zero_mask
-            # loss = masked_squared_diff.sum() / non_zero_mask.sum()
-            x_pred = self.loss_weight * x_pred
-            x_gt = self.loss_weight * x
-            loss = F.mse_loss(x_pred, x_gt)
+            batch_size, seq_length, _ = x_gt_weighted.shape
+            mask = torch.arange(seq_length, device=self.device).expand(batch_size, seq_length) < end_indices.unsqueeze(1)
+            # Apply the mask to both x_pred and x_gt
+            x_pred_weighted = x_pred_weighted[mask]
+            x_gt_weighted = x_gt_weighted[mask]
 
+            loss = F.mse_loss(x_pred_weighted, x_gt_weighted)
+            losses.append(loss.detach())
+            vel_loss = torch.zeros(1).to(self.device)
+            acc_loss = torch.zeros(1).to(self.device)
+            repeat_loss = torch.zeros(1).to(self.device)
+            null_loss = torch.zeros(1).to(self.device)
+            pose_loss = torch.zeros(1).to(self.device)
+            headpose_vel_loss = torch.zeros(1).to(self.device)
+            if self.use_vel_loss:
+                # vel_gt = x[1:] - x[:-1]
+                # vel_pred = x_pred[1:] - x_pred[:-1]
+                # vel_loss = F.mse_loss(vel_pred, vel_gt)
+                # acc_loss = F.mse_loss(vel_pred[1:], vel_pred[:-1])
+                temporal_x = x_gt[:, self.prev_seq_length-2:self.prev_seq_length+1]
+                temporal_x_pred = x_pred[:, self.prev_seq_length-2:self.prev_seq_length+1]
+                temporal_x_vel = temporal_x[:, 1:] - temporal_x[:, :-1]
+                temporal_x_pred_vel = temporal_x_pred[:, 1:] - temporal_x_pred[:, :-1]
+                vel_loss = F.mse_loss(temporal_x_pred_vel, temporal_x_vel)
+                acc_loss = F.mse_loss(temporal_x_pred_vel[:, 1:], temporal_x_pred_vel[:, :-1])
+                loss += self.vel_loss_weight * vel_loss + self.acc_loss_weight * acc_loss
+            if self.use_repeat_token:
+                loss += repeat_loss * self.repeat_loss_weight
+            if self.use_mean_exp:
+                x_null_mean = x_null_out.mean(dim=1)
+                null_loss = F.mse_loss(x_null_mean, mean_exp)
+                loss += null_loss * self.null_loss_weight
+            if self.use_headpose:
+                x_pose_pred_weighted = self.headpose_loss_weight * x_pose_pred
+                x_pose_gt_weighted = self.headpose_loss_weight * x_pose_gt
+                pose_loss = F.mse_loss(x_pose_pred_weighted, x_pose_gt_weighted)
+                loss += pose_loss
+                if self.use_headpose_vel_loss:
+                    x_pose_gt_vel = (x_pose_gt[:, 1:] - x_pose_gt[:, :-1]) * self.headpose_loss_weight
+                    x_pose_pred_vel = (x_pose_pred[:, 1:] - x_pose_pred[:, :-1]) * self.headpose_loss_weight
+                    headpose_vel_loss = F.mse_loss(x_pose_pred_vel, x_pose_gt_vel)
+                    loss += self.headpose_vel_loss_weight * headpose_vel_loss
+            losses.append(vel_loss.detach())
+            losses.append(acc_loss.detach())
+            losses.append(repeat_loss.detach())
+            losses.append(null_loss.detach())
+
+            losses.append(pose_loss.detach())
+            losses.append(headpose_vel_loss.detach())
             loss.backward()
             self.optimizer.step()
             if self.lr_scheduler and self.iteration < self.config["lr_max_iters"] + self.config["warmup_iters"]:
                 self.lr_scheduler.step()
-
-        elif self.model_type == "vanilla":
-            # with autocast(dtype=torch.bfloat16):
-            x_input = torch.zeros_like(x_gt)  # Zero out the motion data for now
-            x_pred = self.model(x_input, x_prev, a_train, a_prev, x_shape)
-            loss = F.mse_loss(x_pred, x_gt)
-
-            loss.backward()
-            self.optimizer.step()
-
-            if self.lr_scheduler:
-                # self.scaler.step(self.optimizer)
-                self.lr_scheduler.step()
-            # self.scaler.update()
-        elif self.model_type == "faceformer":
-            x_pred = self.model(x_gt, x_prev, a_train, a_prev, x_shape)
-            loss = F.mse_loss(x_pred, x[:, :-1, :])
-            loss.backward()
-            self.optimizer.step()
-            if self.lr_scheduler:
-                self.lr_scheduler.step()
-
         # torch.cuda.synchronize()
         # t2 = time.time()
         # if self.rank == 0:
         #     print(f"Data prep time: {(t1 - t0) * 1000:.2f}ms, Forward pass time: {(t2 - t1) * 1000:.2f}ms")
-        return loss.detach()
+        return losses
 
     def save_checkpoint(self, epoch):
         checkpoint_dir = os.path.join(self.output_dir, f"checkpoint_epoch_{epoch}")
@@ -341,19 +405,19 @@ class TrainingManager:
                 if i == len(marks) - 1:  # For the smallest mark, use log scale
                     axes[i, 0].set_yscale('log')
 
-            # Validation losses
-            filtered_val_losses = [(j, loss) for j, loss in enumerate(val_loss_to_plot) if loss <= mark]
+            # # Validation losses
+            # filtered_val_losses = [(j, loss) for j, loss in enumerate(val_loss_to_plot) if loss <= mark]
 
-            if filtered_val_losses:
-                val_iterations, val_losses = zip(*filtered_val_losses)
-                axes[i, 1].plot(val_iterations, val_losses)
-                axes[i, 1].set_title(f"Validation Loss (up to {mark:.0e})")
-                axes[i, 1].set_xlabel("Validation Iteration")
-                axes[i, 1].set_ylabel("Loss")
-                axes[i, 1].set_ylim(0, mark)
+            # if filtered_val_losses:
+            #     val_iterations, val_losses = zip(*filtered_val_losses)
+            #     axes[i, 1].plot(val_iterations, val_losses)
+            #     axes[i, 1].set_title(f"Validation Loss (up to {mark:.0e})")
+            #     axes[i, 1].set_xlabel("Validation Iteration")
+            #     axes[i, 1].set_ylabel("Loss")
+            #     axes[i, 1].set_ylim(0, mark)
 
-                if i == len(marks) - 1:  # For the smallest mark, use log scale
-                    axes[i, 1].set_yscale('log')
+            #     if i == len(marks) - 1:  # For the smallest mark, use log scale
+            #         axes[i, 1].set_yscale('log')
 
         plt.tight_layout()
         plt.savefig(os.path.join(self.output_dir, "loss_plot.png"))
@@ -370,10 +434,10 @@ class TrainingManager:
                 f.write(f"{loss}\n")
             self.iteration_losses = []
 
-        with open(os.path.join(self.output_dir, "validation_feature_losses.txt"), "a") as f:
-            for loss in self.val_feature_loss:
-                f.write(f"{loss}\n")
-            self.val_feature_loss = []
+        # with open(os.path.join(self.output_dir, "validation_feature_losses.txt"), "a") as f:
+        #     for loss in self.val_feature_loss:
+        #         f.write(f"{loss}\n")
+        #     self.val_feature_loss = []
 
         if self.rank == 0:
             print("Loss plot and data saved")
@@ -413,32 +477,29 @@ class TrainingManager:
                     s = batch['shape_latent'].to(self.device)
                     m = batch['mouth_latent'].to(self.device)
 
-                    x_prev, x_gt = x[:, :self.prev_seq_length], x[:, self.prev_seq_length:]
-                    a_prev, a_train = a[:, :self.prev_seq_length], a[:, self.prev_seq_length:]
+                    x_prev_gt, x_gen_gt = x[:, :self.prev_seq_length], x[:, self.prev_seq_length:]
+                    a_prev, a_gen = a[:, :self.prev_seq_length], a[:, self.prev_seq_length:]
                     x_shape = s
+
+                    if self.use_repeat_token:
+                        x_repeat_gt = x_prev_gt[:, -self.repeat_len:] # repeat last few frames of previous motion
+                        x_gen_gt_repeated = torch.cat([x_repeat_gt, x_gen_gt], dim=1)
+                        # only repeat motion, audio will have according special token written in dit_model.py
+                    else:
+                        x_gen_gt_repeated = x_gen_gt
                     if self.model_type == "dit":
-                        noise, x_out, prev_motion_coef, prev_audio_feat = \
-                            self.model(x_gt, a_train, shape_feat=x_shape, style_feat=None, mouth_open_ratio = m,
-                            prev_motion_feat = x_prev, prev_audio_feat = a_prev)
-                        x_pred = x_out
+                        noise, x_pred, prev_motion_coef, prev_audio_feat = \
+                            self.model(motion_feat = x_gen_gt_repeated, audio_or_feat = a_gen,
+                            shape_feat=x_shape, style_feat=None, mouth_open_ratio = m,
+                            prev_motion_feat = x_prev_gt, prev_audio_feat = a_prev)
+                        if self.use_repeat_token:
+                            x_pred = torch.cat([x_pred[:, :self.prev_seq_length], x_pred[:, self.prev_seq_length + self.repeat_len:]], dim=1)
+
                         mse_loss = F.mse_loss(x_pred, x)
                         l1_abs_loss = torch.abs(x_pred - x)
 
-                    elif self.model_type == "vanilla":
-                        x_input = torch.zeros_like(x_gt)
-                        x_pred = self.model.module.inference(x_input, x_prev, a_train, a_prev, x_shape)
-
-                        # Calculate loss for each feature dimension
-                        mse_loss = F.mse_loss(x_pred, x_gt)
-                        l1_abs_loss = torch.abs(x_pred - x_gt)
-
-                    elif self.model_type == "faceformer":
-                        x_pred = self.model(x_gt, x_prev, a_train, a_prev, x_shape)
-                        mse_loss = F.mse_loss(x_pred, x[:, :-1, :])
-                        l1_abs_loss = torch.abs(x_pred - x_gt)
-
                     l1_abs_loss = l1_abs_loss.reshape(l1_abs_loss.shape[0] * l1_abs_loss.shape[1], -1) # (batch_size * seq_len, kp * 3)
-                    x_gt_reshaped = x_gt.reshape(x_gt.shape[0] * x_gt.shape[1], -1) # (batch_size * seq_len, kp * 3)
+                    x_gt_reshaped = x.reshape(x.shape[0] * x.shape[1], -1) # (batch_size * seq_len, kp * 3)
                     x_pred_reshaped = x_pred.reshape(x_pred.shape[0] * x_pred.shape[1], -1) # (batch_size * seq_len, kp * 3)
                     feature_losses.append(l1_abs_loss.cpu().numpy())
                     all_val_info.append(x_gt_reshaped.cpu().numpy())
@@ -543,20 +604,25 @@ if __name__ == "__main__":
         parser.add_argument("-vm", "--vox2_motion_root", type=str, default='/mnt/e/data/live_latent/motion_temp/')
         parser.add_argument("-htn", "--hdtf_train_root", type=str, default="/mnt/e/data/diffposetalk_data/TFHP_raw/train_split/")
         parser.add_argument("-htt", "--hdtf_test_root", type=str, default="/mnt/e/data/diffposetalk_data/TFHP_raw/test_split/")
-        used_dataset = "vox2"
-        parser.add_argument("--vox2_train_end_idx", type=int, default=10)
+        used_dataset = "hdtf"
+        parser.add_argument("--vox2_train_start_idx", type=int, default=0)
+        parser.add_argument("--vox2_train_end_idx", type=int, default=387)
+        parser.add_argument("--hdtf_train_start_idx", type=int, default=170)
+        parser.add_argument("--hdtf_train_end_idx", type=int, default=230)
     else:
         parser.add_argument("-va", "--vox2_audio_root", type=str, default='/home/ubuntu/vox2-az/audio_latent/')
         parser.add_argument("-vm", "--vox2_motion_root", type=str, default='/home/ubuntu/vox2-az/new_live_latent/')
         parser.add_argument("-htn", "--hdtf_train_root", type=str, default="/home/ubuntu/vox2-az/hdtf/train_split/")
         parser.add_argument("-htt", "--hdtf_test_root", type=str, default="/home/ubuntu/vox2-az/hdtf/test_split/")
         used_dataset = "vox2/hdtf"
+        # used_dataset = "hdtf"
+        parser.add_argument("--vox2_train_start_idx", type=int, default=0)
+        # parser.add_argument("--vox2_train_end_idx", type=int, default=387)
         parser.add_argument("--vox2_train_end_idx", type=int, default=4200)
-    parser.add_argument("-o", "--output_dir", type=str, default="output")
+        parser.add_argument("--hdtf_train_start_idx", type=int, default=0)
+        parser.add_argument("--hdtf_train_end_idx", type=int, default=337)
 
-    parser.add_argument("--vox2_train_start_idx", type=int, default=0)
-    parser.add_argument("--hdtf_train_start_idx", type=int, default=0)
-    parser.add_argument("--hdtf_train_end_idx", type=int, default=337)
+    parser.add_argument("-o", "--output_dir", type=str, default="output")
     parser.add_argument("--vox2_validate_start_idx", type=int, default=4200) # 4200
     parser.add_argument("--dataset", type=str, default=used_dataset) # vox2, hdtf, or both
     parser.add_argument("--vox2_validate_end_idx", type=int, default=4250) # 4617
@@ -573,7 +639,7 @@ if __name__ == "__main__":
             "scheduler": "none",
         },
         10: {
-            "save_interval": 1,
+            "save_interval": 500,
             "lr_min_scale": 0.2,
             "warmup_iters": 600,
             "lr_max_iters": 500000,
@@ -589,12 +655,12 @@ if __name__ == "__main__":
             "scheduler": "none",
         },
         387: {
-            "save_interval": 3,
-            "lr_min_scale": 0.05,
-            "warmup_iters": 5000,
-            "lr_max_iters": 200000,
-            "learning_rate": 2e-5,
-            "scheduler": "warmup",
+            "save_interval": 15,
+            "lr_min_scale": 0.2,
+            "warmup_iters": 10000,
+            "lr_max_iters": 500000,
+            "learning_rate": 5e-5,
+            "scheduler": "warmup_cosine",
         },
         400: {
             "save_interval": 5,
@@ -622,7 +688,7 @@ if __name__ == "__main__":
         },
         4200: {
             "save_interval": 1,
-            "lr_min_scale": 0.2,
+            "lr_min_scale": 0.5,
             "warmup_iters": 10000,
             "lr_max_iters": 1000000,
             "learning_rate": 5e-5,
@@ -680,16 +746,25 @@ if __name__ == "__main__":
     60     -0.0219573974609375,  0.0247344970703125,   -0.039764404296875,    0.045,               -0.01512908935546875,    0.017730712890625,    ]
     '''
 
+    headpose_bound_list = [
+        -21,                   25,                   -30,                   30,                  -23,                     23,
+        -0.3,                  0.3,                  -0.3,                 0.28,                ]
+    headpose_loss_weight = [1, 1, 1, 1, 1]
+    use_headpose = True
+    use_headpose_vel_loss = True
 
     config = {
         # Model parameters
+        "use_headpose": use_headpose,
         "model_type" : args.model_type,
-        "x_dim": len(latent_mask_1),
+        "x_dim": len(latent_mask_1) + len(headpose_loss_weight) \
+                   if use_headpose else len(latent_mask_1),
         "person_dim": 63,  # Dimension for person latent
         "a_dim": 768,  # Dimension for audio latent
         "hidden_size": 512,  # Hidden size for the transformer
         "num_layers": 8,  # Number of transformer layers
         "num_attention_heads": 8,  # Number of attention heads
+        "align_mask_width": 1,
         # Training parameters
         "n_diff_steps" : 50, # Number of diffusion steps
         "batch_size": 32,  # Batch size for training
@@ -705,12 +780,25 @@ if __name__ == "__main__":
         # condition parameter
         "use_shape_feat": True, # whether to use condition
         "use_mouth_open_ratio": True, # condition type, concat or add
+        "use_vel_loss": False,
+        "vel_loss_weight": 0,
+        "acc_loss_weight": 0.,
+        "use_repeat_token": False,
+        "repeat_loss_weight": 0.,
+        "repeat_len": 1,
+        "use_mean_exp": True,
+        "null_loss_weight": 1,
+        "use_headpose_vel_loss": use_headpose_vel_loss and use_headpose,
+        "headpose_vel_loss_weight": 0.5,
+        "zero_exp_loss_weight": False,
         # dataset parameters
         "dataset": args.dataset,
         "motion_latent_type": "exp",  # Motion latent type. Accept ["exp", "x_d"]
         "latent_mask_1": latent_mask_1,
         "latent_bound": latent_bound_list,
         "loss_weight": loss_weight,
+        "headpose_bound": headpose_bound_list,
+        "headpose_loss_weight": headpose_loss_weight,
         # training data parameters
         "vox2_train_start_idx": args.vox2_train_start_idx,  # Starting index for training data
         "vox2_train_end_idx": args.vox2_train_end_idx,  # Ending index for training data
@@ -727,8 +815,8 @@ if __name__ == "__main__":
     }
 
     # Load data once in the main process
-    train_data = [torch.Tensor([]) for _ in range(4)]   # motion, audio, shape, mouth
-    val_data = []  # motion, audio, shape, mouth
+    train_data = [torch.Tensor([]) for _ in range(6)]   # motion, audio, shape, mouth, end_indices
+    val_data = []  # motion, audio, shape, mouth, end_indices
     # train_audio_latents, train_motion_latents, train_shape_latents, train_mouth_latents, train_flag_latents, \
     #     val_audio_latents, val_motion_latents, val_shape_latents, val_mouth_latents, val_flag_latents = \
     #     torch.Tensor([]), torch.Tensor([]), torch.Tensor([]),torch.Tensor([]), torch.Tensor([]), [], [], [], [], []
@@ -736,19 +824,21 @@ if __name__ == "__main__":
     if "vox2" in args.dataset:
         vox2_val_data = load_npy_files(args.vox2_audio_root, args.vox2_motion_root,
                                                                          args.vox2_validate_start_idx, args.vox2_validate_end_idx,
-                                                                        config["motion_latent_type"], config["latent_mask_1"], config["latent_bound"])
+                                                                        config["motion_latent_type"], config["latent_mask_1"], config["latent_bound"],
+                                                                        config["use_headpose"], config["headpose_bound"])
         val_data.append(vox2_val_data)
         print(f"Vox2 validation Data loaded. audio shape: {val_data[-1][0].shape}, \
-                motion shape: {val_data[-1][1].shape}, shape shape: {val_data[-1][2].shape}, mouth shape: {val_data[-1][3].shape}")
+                motion shape: {val_data[-1][1].shape}, shape shape: {val_data[-1][2].shape}, mouth shape: {val_data[-1][3].shape}, end_indices shape: {val_data[-1][4].shape}")
         if not config["validate_only"]:
             # Normal Training mode
             vox2_train_data = load_npy_files(args.vox2_audio_root, args.vox2_motion_root,
                                              args.vox2_train_start_idx, args.vox2_train_end_idx,
-                                             config["motion_latent_type"], config["latent_mask_1"], config["latent_bound"])
+                                             config["motion_latent_type"], config["latent_mask_1"], config["latent_bound"],
+                                             config["use_headpose"], config["headpose_bound"])
             for i, d in enumerate(vox2_train_data):
                 train_data[i] = torch.cat([train_data[i], d], dim=0)
             print(f"Vox2 training Data loaded. audio shape: {train_data[0].shape}, motion shape: {train_data[1].shape}, \
-                                                shape shape: {train_data[2].shape}, mouth shape: {train_data[3].shape}")
+                                                shape shape: {train_data[2].shape}, mouth shape: {train_data[3].shape}, end_indices shape: {train_data[4].shape}")
 
     if "hdtf" in args.dataset:
         train_audio_root = args.hdtf_train_root + "audio_latent/"
@@ -756,15 +846,17 @@ if __name__ == "__main__":
         test_audio_root = args.hdtf_test_root + "audio_latent/"
         test_motion_root = args.hdtf_test_root + "live_latent/"
         hdtf_val_data = load_npy_files(test_audio_root, test_motion_root, 0, 8,
-                                        config["motion_latent_type"], config["latent_mask_1"], config["latent_bound"]) # load all validation data
+                                        config["motion_latent_type"], config["latent_mask_1"], config["latent_bound"],
+                                        config["use_headpose"], config["headpose_bound"]) # load all validation data
         val_data.append(hdtf_val_data)
-        print(f"HDTF validation Data loaded. audio shape: {val_data[-1][0].shape}, motion shape: {val_data[-1][1].shape}, shape shape: {val_data[-1][2].shape}, mouth shape: {val_data[-1][3].shape}")
+        print(f"HDTF validation Data loaded. audio shape: {val_data[-1][0].shape}, motion shape: {val_data[-1][1].shape}, shape shape: {val_data[-1][2].shape}, mouth shape: {val_data[-1][3].shape}, end_indices shape: {val_data[-1][4].shape}")
         if not config["validate_only"]:
             hdtf_train_data = load_npy_files(train_audio_root, train_motion_root,
                                              args.hdtf_train_start_idx, args.hdtf_train_end_idx,
-                                             config["motion_latent_type"], config["latent_mask_1"], config["latent_bound"])
+                                             config["motion_latent_type"], config["latent_mask_1"], config["latent_bound"],
+                                             config["use_headpose"], config["headpose_bound"])
             print(f"HDTF training Data loaded. audio shape: {hdtf_train_data[0].shape}, motion shape: {hdtf_train_data[1].shape}, \
-                                                shape shape: {hdtf_train_data[2].shape}, mouth shape: {hdtf_train_data[3].shape}")
+                                                shape shape: {hdtf_train_data[2].shape}, mouth shape: {hdtf_train_data[3].shape}, end_indices shape: {hdtf_train_data[4].shape}")
             for i, d in enumerate(hdtf_train_data):
                 train_data[i] = torch.cat([train_data[i], d], dim=0)
 
