@@ -16,7 +16,21 @@ import cv2
 import torch
 import torchaudio
 import torch.nn.functional as F
-torchaudio.set_audio_backend("soundfile")
+# Check available audio backends and select appropriate one
+available_backends = torchaudio.list_audio_backends()
+print(f"Available audio backends: {available_backends}")
+
+if not available_backends:
+    raise RuntimeError("No audio backends available. Please install at least one of: ffmpeg, soundfile")
+
+if 'ffmpeg' in available_backends:
+    torchaudio.set_audio_backend("ffmpeg")
+elif 'soundfile' in available_backends:
+    torchaudio.set_audio_backend("soundfile")
+else:
+    raise RuntimeError("Neither ffmpeg nor soundfile backend available. Please install one of them.")
+
+print(f"Using audio backend: {torchaudio.get_audio_backend()}")
 
 # wave2vec
 from transformers import Wav2Vec2Model, Wav2Vec2Processor
