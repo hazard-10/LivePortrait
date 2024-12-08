@@ -1,6 +1,6 @@
 # Real-time talking head
 
-This project provides training and inference code for a real-time talking head generaiton.
+This project provides training and inference code for a real-time talking head generation.
 
 [Demo video](https://drive.google.com/file/d/14Wkd0aD27ho2SerSEQtjrxrrvtdOovhi/view?usp=sharing)
 
