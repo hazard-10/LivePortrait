@@ -45,8 +45,8 @@ LOG = 'log'
 AUDIO = 'audio/audio'
 OUTPUT_DIR = 'audio_encoder_output'
 BATCH_SIZE = 16
-prev_context_len = 67
-gen_len_per_window = 8
+prev_context_len = 10
+gen_len_per_window = 65
 
 # DiT model
 config_path = 'D:/Projects/Upenn_CIS_5650/final-project/config/config.json'
@@ -283,6 +283,7 @@ def autoregress_load_and_process_audio(file_path):
     per_window_samples = SECTION_LENGTH * 16027
     first_prev_samples = int(first_segment_prev_length * 16027 / FRAME_RATE)
     remaining_overlap_samples = int(remaining_segment_prev_length / FRAME_RATE * TARGET_SAMPLE_RATE)
+    total_frame = int(waveform.shape[1] / TARGET_SAMPLE_RATE * FRAME_RATE) + 1
     # pad 10 overlap at the beginning
     waveform = torch.nn.functional.pad(waveform, (first_prev_samples, 0))
 
@@ -302,10 +303,10 @@ def autoregress_load_and_process_audio(file_path):
             windows.append(waveform[:, start:min(end, total_sample_count)].squeeze(0))
         start = int(end - remaining_overlap_samples)
 
-    return windows
+    return windows, total_frame
 
 def autoregress_inference_process_wav_file(path):
-    windows = autoregress_load_and_process_audio(path)
+    windows, total_frame = autoregress_load_and_process_audio(path)
     windows = np.array(windows)
 
     inputs = wav2vec_processor(windows, sampling_rate=TARGET_SAMPLE_RATE, return_tensors="pt", padding=True).input_values.to(device)
@@ -320,7 +321,7 @@ def autoregress_inference_process_wav_file(path):
                                                      size=new_seq_length,
                                                      mode='linear',
                                                      align_corners=True).transpose(1,2)
-    return latent_features_interpolated
+    return latent_features_interpolated, total_frame
 
 # Move model and processor to global scope
 wav2vec_model = Wav2Vec2Model.from_pretrained(MODEL_NAME).to(device)
@@ -436,7 +437,7 @@ is_processing = False
 print("Ready to Animate\n")
 
 def inference_thread(portrait_path, audio_path, frame_queue):
-
+    t1 = datetime.now()
     # Process image
     img_rgb = load_image_rgb(portrait_path)
     img_crop_256x256 = cv2.resize(img_rgb, (256, 256))  # force to resize to 256x256
@@ -446,10 +447,10 @@ def inference_thread(portrait_path, audio_path, frame_queue):
     x_s = transform_keypoint(x_s_info)
     f_s = extract_feature_3d(I_s)
     shape_in = x_c_s.reshape(1, -1).to(device)
-
+    t2 = datetime.now()
     # Process audio
-    audio_latent = autoregress_inference_process_wav_file(audio_path)
-
+    audio_latent, total_frame = autoregress_inference_process_wav_file(audio_path)
+    t3 = datetime.now()
     # Generate Motion
     out_motion = torch.tensor([], device=device)
     window_count = audio_latent.shape[0]
@@ -482,9 +483,9 @@ def inference_thread(portrait_path, audio_path, frame_queue):
 
         generated_motion = generated_motion - torch.mean(null_motion, dim=-2, keepdim=True)
         out_motion = torch.cat((out_motion, generated_motion.reshape(-1, motion_dim)), dim=0)
-
+    t4 = datetime.now()
     # Smooth and tune motion
-    out_motion_filtered = savgol_filter(out_motion.cpu().numpy(), window_length=5, polyorder=2, axis=0)
+    out_motion_filtered = savgol_filter(out_motion[:total_frame].cpu().numpy(), window_length=5, polyorder=2, axis=0)
     out_motion = torch.tensor(out_motion_filtered, device=device)
 
     motion_gt = motion_tensor[:, :out_motion.shape[0], :].squeeze(0)
@@ -494,7 +495,7 @@ def inference_thread(portrait_path, audio_path, frame_queue):
     out_motion[:, -5:] = torch.tensor(out_pose_smoothed, device=device)
 
     full_motion = reverse_normalize_pose(out_motion.unsqueeze(0), headpose_bound=headpose_bound).squeeze(0)
-
+    t5 = datetime.now()
     # Generate frame
     pose = full_motion[:, -5:]
     exp = full_motion[:, :-5]
@@ -516,6 +517,13 @@ def inference_thread(portrait_path, audio_path, frame_queue):
         x_d_list.append(x_d_i.squeeze(0))
 
     x_d_batch = torch.stack(x_d_list, dim=0)
+    t6 = datetime.now()
+    print(f"image processing time {(t2 - t1).total_seconds()}s")
+    print(f"audio processing time {(t3 - t2).total_seconds()}s")
+    print(f"motion generation time {(t4 - t3).total_seconds()}s")
+    print(f"motion smoothing time {(t5 - t4).total_seconds()}s")
+    print(f"x_d generation time {(t6 - t5).total_seconds()}s")
+    print(f"total time before frame generation {(t6 - t1).total_seconds()}s")
 
     for i in range(full_motion.shape[0]):
         out = warp_decode(f_s, x_s, x_d_batch[i])
@@ -556,11 +564,12 @@ def generate_talking_head(portrait_path, audio_path):
         if (datetime.now() - pre_time).total_seconds() < 0.035:
             sleep(0.035 - (datetime.now() - pre_time).total_seconds())
 
-        print(f"time to display {datetime.now() - pre_time}")
+        #print(f"time to display {datetime.now() - pre_time}")
 
         if first:
             # Start audio playback and show first frame
             first = False
+            print(f"initial latency {datetime.now() - pre_time}")
             yield frame, gr.update(value=audio_path, autoplay=True)
         else:
             yield frame, gr.update()
@@ -598,4 +607,4 @@ with gr.Blocks() as demo:
     )
 
 if __name__ == "__main__":
-    demo.launch(server_port=9995, share=True)
+    demo.launch(server_port=9995, share=False)
