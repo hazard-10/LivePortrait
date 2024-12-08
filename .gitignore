@@ -12,6 +12,7 @@ __pycache__/
 pretrained_weights/*.md
 pretrained_weights/docs
 pretrained_weights/liveportrait
+pretrained_weights/*
 
 # Ipython notebook
 #*.ipynb
@@ -27,6 +28,7 @@ gradio_temp/**
 ffmpeg/
 LivePortrait_env/
 live_env
+fp/
 
 audio_driven_video_output.mp4
 video_driven_output.mp4
@@ -38,3 +40,4 @@ sync_output/*
 *.mp4
 # syncnet
 sync_output/
+.gradio/
