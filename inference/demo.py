@@ -395,21 +395,6 @@ def normalize_pose(full_motion, headpose_bound):
 
     return full_motion
 
-headpose_bound = torch.tensor([-21, 25, -30, 30, -23, 23, -0.3, 0.3, -0.3, 0.28], device = device)
-motion_mean_exp_tensor = torch.from_numpy(np.load(motion_mean_exp_path)).to(device = device)
-motion_mean_exp_tensor = motion_mean_exp_tensor.unsqueeze(0).to(device = device)
-motion_tensor, _, _, _ = process_motion_tensor(motion_mean_exp_tensor, None, \
-                            latent_type=audio_model_config['motion_latent_type'],
-                            latent_mask_1=audio_model_config['latent_mask_1'],
-                            latent_bound=torch.tensor(audio_model_config['latent_bound'], device=device),
-                            use_headpose=True, headpose_bound=headpose_bound)
-mean_exp = torch.mean(motion_tensor.reshape(-1, motion_tensor.shape[-1]), dim=0)
-mouth_open_ratio_input = torch.tensor([mouth_ratio], device=device).unsqueeze(0)
-motion_dim = audio_model_config['x_dim']
-
-is_processing = False
-print("Ready to Animate\n")
-
 def reverse_normalize_pose(normalized_motion, headpose_bound):
     assert headpose_bound is not None and len(headpose_bound) % 2 == 0
     headpose_bound = torch.tensor(headpose_bound)
@@ -434,6 +419,21 @@ def reverse_normalize_pose(normalized_motion, headpose_bound):
     normalized_motion[:, :, -5:] = last_5_features
 
     return normalized_motion
+
+headpose_bound = torch.tensor([-21, 25, -30, 30, -23, 23, -0.3, 0.3, -0.3, 0.28], device = device)
+motion_mean_exp_tensor = torch.from_numpy(np.load(motion_mean_exp_path)).to(device = device)
+motion_mean_exp_tensor = motion_mean_exp_tensor.unsqueeze(0).to(device = device)
+motion_tensor, _, _, _ = process_motion_tensor(motion_mean_exp_tensor, None, \
+                            latent_type=audio_model_config['motion_latent_type'],
+                            latent_mask_1=audio_model_config['latent_mask_1'],
+                            latent_bound=torch.tensor(audio_model_config['latent_bound'], device=device),
+                            use_headpose=True, headpose_bound=headpose_bound)
+mean_exp = torch.mean(motion_tensor.reshape(-1, motion_tensor.shape[-1]), dim=0)
+mouth_open_ratio_input = torch.tensor([mouth_ratio], device=device).unsqueeze(0)
+motion_dim = audio_model_config['x_dim']
+
+is_processing = False
+print("Ready to Animate\n")
 
 def inference_thread(portrait_path, audio_path, frame_queue):
 
@@ -491,13 +491,9 @@ def inference_thread(portrait_path, audio_path, frame_queue):
     out_motion = fixed_blink_noise(out_motion, motion_gt)
     out_pose_motion = out_motion[:, -5:]
     out_pose_smoothed = savgol_filter(out_pose_motion.cpu().numpy(), window_length=15, polyorder=2, axis=0)
-    out_motion[:, -5:-2] *= 2
-    out_motion[:, -2:] *= 0.5
     out_motion[:, -5:] = torch.tensor(out_pose_smoothed, device=device)
 
-    generated_motion = out_motion
-    generated_motion = reverse_normalize_pose(generated_motion.unsqueeze(0), headpose_bound=headpose_bound)
-    full_motion = generated_motion.squeeze(0)
+    full_motion = reverse_normalize_pose(out_motion.unsqueeze(0), headpose_bound=headpose_bound).squeeze(0)
 
     # Generate frame
     pose = full_motion[:, -5:]
