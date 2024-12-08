@@ -552,6 +552,7 @@ def generate_talking_head(portrait_path, audio_path):
     thread.start()
 
     first = True
+    frame = None
 
     while True:
 
@@ -569,12 +570,14 @@ def generate_talking_head(portrait_path, audio_path):
         if first:
             # Start audio playback and show first frame
             first = False
-            print(f"initial latency {datetime.now() - pre_time}")
+            print(f"initial latency {datetime.now() - pre_time}s\n")
             yield frame, gr.update(value=audio_path, autoplay=True)
         else:
             yield frame, gr.update()
 
         pre_time = datetime.now()
+
+    yield frame, gr.update(value=audio_path, autoplay=False)
 
     is_processing = False
     process_btn.interactive = True
@@ -585,7 +588,7 @@ with gr.Blocks() as demo:
 
     with gr.Row():
         # Left column for inputs and button
-        with gr.Column(scale=1):
+        with gr.Column(scale=3):
             portrait_input = gr.Image(
                 label="Input Portrait 🖼️",
                 type="filepath"
@@ -597,8 +600,8 @@ with gr.Blocks() as demo:
             process_btn = gr.Button("Animate 🚀")
 
         # Right column for video output
-        with gr.Column(scale=1):
-            video_output = gr.Image(label="Generated Animation", streaming=True)
+        with gr.Column(scale=7):
+            video_output = gr.Image(label="Generated Animation 🖼️", streaming=True)
 
     process_btn.click(
         fn=generate_talking_head,
