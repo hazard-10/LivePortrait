@@ -379,6 +379,9 @@ def fixed_blink_noise(motion_tensor, motion_gt):
         for f in freeze_index:
             # motion_tensor[i, f] = motion_gt[i, f]|
             motion_tensor[i, f] = 0
+        motion_tensor[i, 4] = 0.008
+        motion_tensor[i, 8] = -0.001
+        motion_tensor[i, 10] = -0.001
     return motion_tensor
 
 # normalize headpose
