@@ -2,10 +2,6 @@
 
 This project provides comprehensive training and inference code for generating real-time talking head animations. By building upon state-of-the-art methodologies, this work seeks to advance the field of realistic portrait animation with a focus on real-time performance, natural expressiveness, and audio synchronization.
 
----
-
-## Demo Video
-
 ![Demo Video](https://github.com/hazard-10/LivePortrait/blob/main/366_1733367920.gif)
 
 ---
