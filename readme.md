@@ -10,8 +10,7 @@ This project is rooted in the foundational contributions of **LivePortrait**, a 
 
 In addition, **DiffPoseTalk** introduces an approach to speech-driven, stylistic 3D facial animation and head pose generation using diffusion models. The framework employs a style encoder that extracts stylistic features from reference videos, enabling the generation of diverse animations beyond the limitations of traditional one-hot encoding. 
 
-While these methods offer an impressive baseline, its application in dynamic, real-time settings necessitates further refinements to enhance synchronization and interactivity. By leveraging the strengths of both LivePortrait and DiffPoseTalk, this project introduces a novel system for real-time talking head generation, blending high-quality animation with real-time responsiveness and stylistic diversity. This project builds on LivePortrait and DiffPoseTalk by addressing these challenges and expanding its capabilities to better meet the demands of real-time systems. The work presented here ensures that the resulting animations not only maintain visual quality but also operate at speeds suitable for interactive applications, such as virtual avatars, telepresence systems, and digital content creation.
-
+While these methods offer an impressive baseline, its application in dynamic, real-time settings necessitates further refinements to enhance synchronization and interactivity. By leveraging the strengths of both LivePortrait and DiffPoseTalk, this project introduces a novel system for real-time talking head generation, blending high-quality animation with real-time responsiveness and stylistic diversity. 
 
 ---
 
@@ -59,7 +58,7 @@ pip install -r requirements.txt
 The inputs to this model consist of a portrait image with the target character and a driving audio. The entire inference pipeline can be illustrated as below. Full inference example [here](/inference/inference_final.ipynb).
 
 <div align="center">
-  <img src="/assets/docs/inference_pipeline.png" alt="Inference Pipeline" width="70%">
+  <img src="/assets/docs/inference_pipeline.png" alt="Inference Pipeline" width="40%">
 </div>
 
 First, the portrait image and the input audio will pass through the LivePortrait pipeline and wave2vec pipeline to extract the facial feature embeddings and audio feature embeddings respectively. Then the character motion feature embeddings will be generated using the driving audio embeddings through the DiT model. Combining the facial features and the generated motion embeddings, the LivePortrait model can generate the frames with animated target character.
@@ -67,15 +66,22 @@ First, the portrait image and the input audio will pass through the LivePortrait
 
 ### Inference Analysis
 
-Initial analysis shows that frames generation takes the majority of the inference time, compared to feature embedding generation and motion generation. This is because frames generation needs to work in pixel space which involves significantly more computation and also LivePortriat model is a bigger model with around 100M parameters. While motion generation time depends on the context length, we choose to use 10 frames as context to generate 65 frames for shorter streaming latency (25 FPS).
+Initial analysis shows that frame generation takes the majority of the inference time, compared to feature embedding generation and motion generation. This is because frame generation operates in pixel space, which involves significantly more computation. Additionally, the LivePortrait model is a larger model with approximately 100M parameters. While motion generation time depends on the context length, we choose to use 10 frames as context to generate 65 frames to minimize streaming latency (25 FPS).
 
-![inference performace](/assets/docs/inference_performance.png)
+<div align="center">
+  <img src="/assets/docs/inference_performance.png" alt="Inference Performance" width="70%">
+</div>
 
-PyTorch porfiler results on LivePortrait model shows that a lot of the time is spend on transferring tensors between CPU and GPU, causing computation delays. Pinned memory is therefore used for fast CPU-GPU transfers and cuda streams to overlap transfer with computation. Also, leveraging models with optimized compute graphs, inference time of LivePortrait model is reduced by 32.7%.
+PyTorch profiler results on the LivePortrait model indicate that a significant amount of time is spent transferring tensors between the CPU and GPU, causing computation delays. To address this, pinned memory is utilized for faster CPU-GPU transfers, and CUDA streams are employed to overlap data transfer with computation. Additionally, by leveraging models with optimized compute graphs, the inference time of the LivePortrait model is reduced by 32.7%.
 
-![profiler](/assets/docs/profiler.png)
-<br>
-![analysis](/assets/docs/compare.png)
+<div align="center">
+  <img src="/assets/docs/profiler.png" alt="Profiler Results" width="70%">
+</div>
+
+<div align="center">
+  <img src="/assets/docs/compare.png" alt="Comparison Analysis" width="70%">
+</div>
+
 
 ### Gradio Interface
 
