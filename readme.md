@@ -50,7 +50,7 @@ pip install -r requirements.txt
 
 ---
 
-### Inference Pipeline
+## Inference Pipeline
 
 The inputs to this model consist of a portrait image with the target character and a driving audio. The entire inference pipeline can be illustrated as below. Full inference example [here](/inference/inference_final.ipynb).
 
@@ -62,7 +62,7 @@ First, the portrait image and the input audio will pass through the LivePortrait
 
 ---
 
-### Inference Analysis
+## Inference Analysis
 
 Initial analysis shows that frame generation takes the majority of the inference time, compared to feature embedding generation and motion generation. This is because frame generation operates in pixel space, which involves significantly more computation. Additionally, the LivePortrait model is a larger model with approximately 100M parameters. While motion generation time depends on the context length, we choose to use 10 frames as context to generate 65 frames to minimize streaming latency (25 FPS).
 
@@ -82,7 +82,7 @@ PyTorch profiler results on the LivePortrait model indicate that a significant a
 
 ---
 
-### Gradio Interface
+## Gradio Interface
 
 We also provide a [Gradio](https://github.com/gradio-app/gradio) interface for a better experience, just run by:
 ```
@@ -91,6 +91,15 @@ python inference/demo.py
 and then access the demo page at `http://127.0.0.1:9995/` in browers.
 
 ![gradio](/assets/docs/gradio.gif)
+
+---
+
+## Presentation
+* [Project Pitch](https://docs.google.com/presentation/d/1wW44dOhsTCxuoXrQ8VEi9z-6T6eDXEtbWVjs7DTH4Vc/edit?usp=sharing)
+* [Milestone 1](https://docs.google.com/presentation/d/1M2dl1g1gnDtMjNhSE9-vLKHTzAoIhFJjbaVoIIrts9Y/edit?usp=sharing)
+* [Milestone 2](https://docs.google.com/presentation/d/1YoBdEKi-yk2Q9oUrFiKjmbm6rFG5KIRDzCaG1GlLAOo/edit?usp=sharing)
+* [Milestone 3](https://docs.google.com/presentation/d/1_BUs3CDr7zClDKhmTLq9Nx4l6SP4E5dHbCEWYKGPVpk/edit?usp=sharing)
+* [Final Presentation](https://docs.google.com/presentation/d/1oOiJDrIwr7jVkeN4MLj4Y0ex_7Z1tFCJJERDtTMe_Wc/edit?usp=sharing)
 
 
 ---
