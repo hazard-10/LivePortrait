@@ -12,7 +12,7 @@ This project is rooted in the foundational contributions of **LivePortrait**, a 
 
 In addition, **DiffPoseTalk** introduces an approach to speech-driven, stylistic 3D facial animation and head pose generation using diffusion models. The framework employs a style encoder that extracts stylistic features from reference videos, enabling the generation of diverse animations beyond the limitations of traditional one-hot encoding. 
 
-While these methods offer an impressive baseline, its application in dynamic, real-time settings necessitates further refinements to enhance synchronization and interactivity. By leveraging the strengths of both LivePortrait and DiffPoseTalk, this project introduces a novel system for real-time talking head generation, blending high-quality animation with real-time responsiveness and stylistic diversity. 
+While these methods offer an impressive baseline, its application in dynamic, real-time settings necessitates further refinements to enhance synchronization and interactivity. By leveraging the strengths of both LivePortrait and DiffPoseTalk, this project introduces a novel system for real-time talking head generation, blending high-quality animation with real-time responsiveness. 
 
 ---
 
@@ -29,7 +29,7 @@ This work introduces refined techniques and parameter adjustments to achieve pre
 Facial expressions and movements, including gaze direction and head pose, are key elements of natural human communication. This project incorporates tuning of facial animation parameters to enhance the realism and expressiveness of the generated portraits. Specific improvements include:
 - **Head Pose Dynamics:** Adjusting head movements to align with the context of speech and emotional expression, ensuring fluid and believable animations.
 - **Subtle Expressions:** Incorporating nuanced changes in facial expressions, such as micro-expressions, to add depth and authenticity to the generated animations.
-- **Gaze Contact:** Refining the gaze direction to maintain realistic and natural eye movement, contributing to the illusion of engagement with the viewer.s
+- **Gaze Contact:** Refining the gaze direction to control eye movement.
 
 ### 3. **Real-Time Rendering Capability**
 
