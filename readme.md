@@ -6,7 +6,7 @@ This project provides comprehensive training and inference code for generating r
 
 ## Demo Video
 
-[Watch the Demo Video](366_1733367920.mp4)
+![Demo Video](https://github.com/hazard-10/LivePortrait/blob/main/366_1733367920.gif)
 
 ---
 
