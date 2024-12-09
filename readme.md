@@ -4,6 +4,12 @@ This project provides comprehensive training and inference code for generating r
 
 ---
 
+## Demo Video
+
+[Watch the Demo Video](366_1733367920.mp4)
+
+---
+
 ## Introduction
 
 This project is rooted in the foundational contributions of **LivePortrait**, a framework for animating static portrait images based on motion retargeting from driving videos. LivePortrait introduces advanced techniques such as stitching and retargeting, enabling the seamless transfer of facial movements from a source video to a target static image. Its computational efficiency and visual fidelity make it an excellent foundation for applications demanding real-time portrait animation. 
@@ -38,12 +44,6 @@ This work is the optimization of the LivePortrait inference framework to enable 
 
 ---
 
-## Demo Video
-
-[Watch the Demo Video](https://example.com/demo-video)
-
----
-
 ## Installation
 
 To install and set up the system, follow these steps to ensure all required dependencies are satisfied. Detailed instructions are included in the `requirements.txt` file.
@@ -52,6 +52,7 @@ To install and set up the system, follow these steps to ensure all required depe
 pip install -r requirements.txt
 ```
 
+---
 
 ### Inference Pipeline
 
@@ -63,6 +64,7 @@ The inputs to this model consist of a portrait image with the target character a
 
 First, the portrait image and the input audio will pass through the LivePortrait pipeline and wave2vec pipeline to extract the facial feature embeddings and audio feature embeddings respectively. Then the character motion feature embeddings will be generated using the driving audio embeddings through the DiT model. Combining the facial features and the generated motion embeddings, the LivePortrait model can generate the frames with animated target character.
 
+---
 
 ### Inference Analysis
 
@@ -82,6 +84,7 @@ PyTorch profiler results on the LivePortrait model indicate that a significant a
   <img src="/assets/docs/compare.png" alt="Comparison Analysis" width="70%">
 </div>
 
+---
 
 ### Gradio Interface
 
