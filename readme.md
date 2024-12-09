@@ -60,8 +60,7 @@ To install and set up the system, follow these steps to ensure all required depe
 
 ```bash
 pip install -r requirements.txt
-
-
+```
 
 ## References
 
